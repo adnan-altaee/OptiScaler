@@ -560,6 +560,9 @@ class Config
     // dx11wdx12
     CustomOptional<bool> Dx11DelayedInit { false };
     CustomOptional<bool, SoftDefault> DontUseNTShared { true };
+    // Dx11wDx12 FG swapchain: when ReShade wraps the hidden DX11 swapchain, present it first and capture the
+    // back buffer from ReShade's reshade_present event, so ReShade's effects and overlay reach the FG output
+    CustomOptional<bool> Dx11wDx12CaptureAfterReShade { true };
 
     // vulkanwdx12
     CustomOptional<bool> VulkanUseCopyForInputs { false };

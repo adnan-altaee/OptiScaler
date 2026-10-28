@@ -71,6 +71,10 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void* pMetaData) override;
 
+    // Called from ReShade's reshade_present event while this wrapper presents its hidden DX11 swapchain:
+    // copies the back buffer (with ReShade's effects and overlay drawn) into the current shared copy.
+    bool CaptureReShadeBackBuffer(ID3D11Resource* backBuffer);
+
   private:
     bool _InitInteropObjects();
     bool _RequestSharedBackBuffer(UINT index);
@@ -133,6 +137,11 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     UINT _currentFakeIndex = 0;
     DXGI_FORMAT _bufferFormat = DXGI_FORMAT_UNKNOWN;
     bool _interopInitialized = false;
+
+    // ReShade capture (Config Dx11wDx12CaptureAfterReShade)
+    bool _capturedFromReShade = false;
+    UINT _reshadeCaptureHits = 0;
+    UINT _reshadeCaptureMisses = 0;
 
     HWND _handle = nullptr;
 };

@@ -19,9 +19,112 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
+#include <tlhelp32.h>
+
+// ReShade add-on API (v6.8.0, API version 20). Only the API and event headers are used, not reshade.hpp,
+// so ReShade's Dear ImGui function table header is never pulled into this translation unit.
+#include "../../external/reshade/include/reshade_events.hpp"
+
+// Matches ReShade 6.8.0 (reshade.hpp, which is not included here, defines the same value)
+#ifndef RESHADE_API_VERSION
+#define RESHADE_API_VERSION 20
+#endif
+
 #pragma intrinsic(_ReturnAddress)
 
 static int scCount = 0;
+
+// ReShade capture for the Dx11wDx12 FG swapchain.
+//
+// ReShade wraps the hidden DX11 swapchain this wrapper presents (it sees that CreateSwapChain call, not the
+// game's) and renders its effects and overlay inside that swapchain's Present. The original order copied the
+// back buffer to the DX12 FG swapchain before that Present, so ReShade's output never reached the screen.
+// With Dx11wDx12CaptureAfterReShade, the hidden swapchain is presented first and the back buffer is copied
+// from ReShade's reshade_present event ("called after ReShade has rendered its overlay"), right before the
+// native Present. OptiScaler registers itself as an external ReShade add-on only to receive that event.
+namespace ReShadeCapture
+{
+static Dx11wDx12SC* captureTarget = nullptr;
+static DWORD captureThread = 0;
+static int state = 0; // 0 = not tried, 1 = registered, -1 = unavailable
+
+static HMODULE FindReShadeModule()
+{
+    HMODULE result = nullptr;
+    auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return nullptr;
+
+    MODULEENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+
+    if (Module32FirstW(snapshot, &entry))
+    {
+        do
+        {
+            if (GetProcAddress(entry.hModule, "ReShadeRegisterAddon") != nullptr &&
+                GetProcAddress(entry.hModule, "ReShadeRegisterEvent") != nullptr)
+            {
+                result = entry.hModule;
+                break;
+            }
+        } while (Module32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return result;
+}
+
+static void OnReShadePresent(reshade::api::effect_runtime* runtime)
+{
+    auto target = captureTarget;
+    if (target == nullptr || runtime == nullptr || GetCurrentThreadId() != captureThread)
+        return;
+
+    const auto backBuffer = runtime->get_current_back_buffer();
+    if (backBuffer.handle == 0)
+        return;
+
+    // On D3D11, ReShade resource handles are the native ID3D11Resource pointers
+    target->CaptureReShadeBackBuffer(reinterpret_cast<ID3D11Resource*>(backBuffer.handle));
+}
+
+static bool EnsureRegistered()
+{
+    if (state != 0)
+        return state > 0;
+
+    state = -1;
+
+    auto reshadeModule = FindReShadeModule();
+    if (reshadeModule == nullptr)
+    {
+        LOG_INFO("ReShade not loaded, Dx11wDx12 capture keeps the original order");
+        return false;
+    }
+
+    using RegisterAddonFn = bool (*)(void*, uint32_t);
+    using RegisterEventFn = void (*)(reshade::addon_event, void*);
+
+    auto registerAddon = reinterpret_cast<RegisterAddonFn>(GetProcAddress(reshadeModule, "ReShadeRegisterAddon"));
+    auto registerEvent = reinterpret_cast<RegisterEventFn>(GetProcAddress(reshadeModule, "ReShadeRegisterEvent"));
+
+    if (registerAddon == nullptr || registerEvent == nullptr || dllModule == nullptr)
+        return false;
+
+    if (!registerAddon(dllModule, RESHADE_API_VERSION))
+    {
+        LOG_WARN("ReShadeRegisterAddon failed (ReShade older than API version {}?)", RESHADE_API_VERSION);
+        return false;
+    }
+
+    registerEvent(reshade::addon_event::reshade_present, reinterpret_cast<void*>(&OnReShadePresent));
+
+    state = 1;
+    LOG_INFO("Registered with ReShade; Dx11wDx12 will capture frames after ReShade's effects and overlay");
+    return true;
+}
+} // namespace ReShadeCapture
 
 namespace
 {
@@ -384,7 +487,39 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_RequestSharedBackBuffer(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
 
-    if (!_CopyDx11BackBufferToShared(dx11Index))
+    // ReShade capture: present the hidden DX11 swapchain first so ReShade renders its effects and overlay,
+    // and take the frame from its reshade_present event (see ReShadeCapture above). Disabled for good if
+    // ReShade never reports a frame for this swapchain within the first 120 presents.
+    bool realPresented = false;
+    _capturedFromReShade = false;
+
+    if (_real != nullptr && !State::Instance().isRunningOnLinux &&
+        Config::Instance()->Dx11wDx12CaptureAfterReShade.value_or_default() &&
+        (_reshadeCaptureHits > 0 || _reshadeCaptureMisses < 120) && ReShadeCapture::EnsureRegistered())
+    {
+        ReShadeCapture::captureThread = GetCurrentThreadId();
+        ReShadeCapture::captureTarget = this;
+
+        auto realPresentResult = _real->Present(0, Flags);
+
+        ReShadeCapture::captureTarget = nullptr;
+        realPresented = true;
+
+        if (FAILED(realPresentResult))
+            LOG_WARN("hidden real DX11 Present (ReShade capture) failed: {:X}", (UINT) realPresentResult);
+
+        if (_capturedFromReShade)
+        {
+            if (_reshadeCaptureHits++ == 0)
+                LOG_INFO("ReShade capture active on Dx11wDx12SC {:X}", (size_t) this);
+        }
+        else if (_reshadeCaptureHits == 0 && ++_reshadeCaptureMisses == 120)
+        {
+            LOG_WARN("ReShade never reported a frame for this swapchain; using the original copy order");
+        }
+    }
+
+    if (!_capturedFromReShade && !_CopyDx11BackBufferToShared(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
 
     if (!_WaitDx11ThenDx12())
@@ -413,7 +548,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
               _bufferCount);
 
     // Some memes with Vk swapchains on Lunyx and overlays
-    if (_real != nullptr && !State::Instance().isRunningOnLinux)
+    if (_real != nullptr && !State::Instance().isRunningOnLinux && !realPresented)
     {
         UINT realFlags = Flags;
 
@@ -1047,6 +1182,22 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
     }
 
     _openedDx11BackBufferStates[_currentFakeIndex] = D3D12_RESOURCE_STATE_COMMON;
+    return true;
+}
+
+bool Dx11wDx12SC::CaptureReShadeBackBuffer(ID3D11Resource* backBuffer)
+{
+    if (backBuffer == nullptr || _dx11Context == nullptr)
+        return false;
+
+    if (_currentFakeIndex >= _sharedDx11BackBufferCopies.size() ||
+        _sharedDx11BackBufferCopies[_currentFakeIndex] == nullptr)
+    {
+        return false;
+    }
+
+    _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], backBuffer);
+    _capturedFromReShade = true;
     return true;
 }
 
