@@ -13,6 +13,7 @@
 #include <Util.h>
 #include <Config.h>
 #include <misc/IdentifyGpu.h>
+#include <misc/HiddenWindow.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -75,8 +76,63 @@ static HMODULE FindReShadeModule()
     return result;
 }
 
+static bool overlayOpen = false;
+static UINT inputLogLines = 0;
+static UINT inputLogFrame = 0;
+static uint32_t lastMouseX = UINT32_MAX;
+static uint32_t lastMouseY = UINT32_MAX;
+static bool lastLeftButton = false;
+
+// Logs what ReShade's input sees while its overlay is open (limited number of lines), to tell a mouse position
+// problem (cursor not following) from a routing problem (no button presses arriving)
+static void LogOverlayInput(reshade::api::effect_runtime* runtime)
+{
+    if (!overlayOpen || inputLogLines >= 40)
+        return;
+
+    inputLogFrame++;
+
+    uint32_t mouseX = 0;
+    uint32_t mouseY = 0;
+    runtime->get_mouse_cursor_position(&mouseX, &mouseY);
+    const bool leftButton = runtime->is_mouse_button_down(0);
+
+    const bool buttonChanged = leftButton != lastLeftButton;
+    const bool moved = mouseX != lastMouseX || mouseY != lastMouseY;
+
+    // Button changes right away, cursor moves at most twice a second
+    if (!buttonChanged && !(moved && inputLogFrame >= 30))
+        return;
+
+    inputLogFrame = 0;
+    inputLogLines++;
+    lastMouseX = mouseX;
+    lastMouseY = mouseY;
+    lastLeftButton = leftButton;
+
+    POINT cursor = {};
+    GetPhysicalCursorPos(&cursor); // GetCursorPos is hooked by ReShade while it blocks cursor warping
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    runtime->get_screenshot_width_and_height(&width, &height);
+
+    LOG_INFO("ReShade overlay input: cursor {},{} in a {}x{} frame, left button {} (screen cursor {},{})", mouseX,
+             mouseY, width, height, leftButton ? "down" : "up", cursor.x, cursor.y);
+}
+
+static bool OnReShadeOpenOverlay(reshade::api::effect_runtime* runtime, bool open, reshade::api::input_source source)
+{
+    overlayOpen = open;
+    LOG_INFO("ReShade overlay {} (source {})", open ? "opened" : "closed", (int) source);
+    return false; // never block ReShade from opening or closing it
+}
+
 static void OnReShadePresent(reshade::api::effect_runtime* runtime)
 {
+    if (runtime != nullptr)
+        LogOverlayInput(runtime);
+
     auto target = captureTarget;
     if (target == nullptr || runtime == nullptr || GetCurrentThreadId() != captureThread)
         return;
@@ -119,6 +175,7 @@ static bool EnsureRegistered()
     }
 
     registerEvent(reshade::addon_event::reshade_present, reinterpret_cast<void*>(&OnReShadePresent));
+    registerEvent(reshade::addon_event::reshade_open_overlay, reinterpret_cast<void*>(&OnReShadeOpenOverlay));
 
     state = 1;
     LOG_INFO("Registered with ReShade; Dx11wDx12 will capture frames after ReShade's effects and overlay");
@@ -1190,6 +1247,14 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
     return true;
 }
 
+// ReShade only knows the hidden window (the output window of the swapchain it wraps), which matters for its overlay:
+// - mouse coordinates are converted with ScreenToClient/GetClientRect of that window, so it has to cover the
+//   game window's client area exactly
+// - window messages are only routed to its overlay when they are for that window, one of its children, or
+//   its parent (or a window that registered raw input), and the game window is none of those. As a hidden
+//   child of the game window, the game window's mouse messages are routed to it.
+// Window changes are requested asynchronously (posted to the window's own thread, see misc/HiddenWindow.h),
+// so the presenting thread never waits on another thread's message queue.
 void Dx11wDx12SC::_SyncHiddenWindowToGameWindow()
 {
     if (_real == nullptr || _handle == nullptr || !IsWindow(_handle))
@@ -1210,25 +1275,101 @@ void Dx11wDx12SC::_SyncHiddenWindowToGameWindow()
     if (!IsWindow(_hiddenWindow))
         return;
 
+    _hiddenWindowSyncFrame++;
+
+    const DWORD ownerThread = GetWindowThreadProcessId(_hiddenWindow, nullptr);
+    const bool ownedByThisThread = ownerThread == GetCurrentThreadId();
+    const bool hasPumpThread = GetPropW(_hiddenWindow, kHiddenSwapchainWindowPumpProp) != nullptr;
+    const bool isChild = GetAncestor(_hiddenWindow, GA_PARENT) == _handle;
+
+    if (isChild && !_hiddenWindowAttachLogged)
+    {
+        _hiddenWindowAttachLogged = true;
+        _mirroredClientRect = {};
+        LOG_INFO("Hidden DX11 swapchain window {:X} is now a hidden child of the game window {:X}",
+                 (size_t) _hiddenWindow, (size_t) _handle);
+    }
+
+    // A window owned by another thread is only changed when that thread pumps messages
+    if (!isChild && Config::Instance()->Dx11wDx12ParentHiddenWindow.value_or_default() &&
+        (ownedByThisThread || hasPumpThread) && _hiddenWindowAttachRequests < 3 &&
+        (_hiddenWindowAttachRequests == 0 || _hiddenWindowSyncFrame - _hiddenWindowLastAttachFrame > 120))
+    {
+        _hiddenWindowAttachRequests++;
+        _hiddenWindowLastAttachFrame = _hiddenWindowSyncFrame;
+
+        if (ownedByThisThread)
+            SendMessageW(_hiddenWindow, kHiddenSwapchainWindowMsgAttach, reinterpret_cast<WPARAM>(_handle), 0);
+        else
+            PostMessageW(_hiddenWindow, kHiddenSwapchainWindowMsgAttach, reinterpret_cast<WPARAM>(_handle), 0);
+
+        LOG_INFO("Requested hidden DX11 swapchain window {:X} to become a child of the game window {:X} "
+                 "(attempt {}, owner thread {}, present thread {}, own pump thread: {})",
+                 (size_t) _hiddenWindow, (size_t) _handle, _hiddenWindowAttachRequests, ownerThread,
+                 GetCurrentThreadId(), hasPumpThread);
+        return;
+    }
+
     RECT client = {};
     if (!GetClientRect(_handle, &client) || client.right <= 0 || client.bottom <= 0)
         return;
 
-    POINT topLeft = { 0, 0 };
-    if (!ClientToScreen(_handle, &topLeft))
-        return;
-
-    const RECT screenRect = { topLeft.x, topLeft.y, topLeft.x + client.right, topLeft.y + client.bottom };
-    if (EqualRect(&screenRect, &_mirroredClientRect))
-        return;
-
-    // Stays hidden (no SWP_SHOWWINDOW). Async so a window owned by another thread never blocks the present.
-    if (SetWindowPos(_hiddenWindow, nullptr, screenRect.left, screenRect.top, client.right, client.bottom,
-                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_ASYNCWINDOWPOS))
+    RECT target = { 0, 0, client.right, client.bottom };
+    if (!isChild)
     {
-        _mirroredClientRect = screenRect;
-        LOG_INFO("Hidden DX11 swapchain window mirrors the game window: {}x{} at {},{}", client.right, client.bottom,
-                 screenRect.left, screenRect.top);
+        POINT topLeft = { 0, 0 };
+        if (!ClientToScreen(_handle, &topLeft))
+            return;
+
+        target = { topLeft.x, topLeft.y, topLeft.x + client.right, topLeft.y + client.bottom };
+    }
+
+    if (!EqualRect(&target, &_mirroredClientRect))
+    {
+        // Stays hidden (no SWP_SHOWWINDOW). Async unless this thread owns the window, so a window owned by
+        // another thread never blocks the present.
+        UINT flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING;
+        if (!ownedByThisThread)
+            flags |= SWP_ASYNCWINDOWPOS;
+
+        if (SetWindowPos(_hiddenWindow, nullptr, target.left, target.top, client.right, client.bottom, flags))
+        {
+            _mirroredClientRect = target;
+            _hiddenWindowVerifyFrame = _hiddenWindowSyncFrame + 30;
+            _hiddenWindowVerifyLogged = false;
+            LOG_INFO("Hidden DX11 swapchain window follows the game window: {}x{} at {},{} ({})", client.right,
+                     client.bottom, target.left, target.top, isChild ? "child" : "screen");
+        }
+    }
+
+    // Check that the request was actually carried out (it is not if the owning thread never pumps messages)
+    if (!_hiddenWindowVerifyLogged && _hiddenWindowVerifyFrame != 0 && _hiddenWindowSyncFrame >= _hiddenWindowVerifyFrame)
+    {
+        _hiddenWindowVerifyLogged = true;
+
+        RECT hiddenClient = {};
+        GetClientRect(_hiddenWindow, &hiddenClient);
+
+        POINT hiddenOrigin = { 0, 0 };
+        POINT gameOrigin = { 0, 0 };
+        ClientToScreen(_hiddenWindow, &hiddenOrigin);
+        ClientToScreen(_handle, &gameOrigin);
+
+        if (hiddenClient.right == client.right && hiddenClient.bottom == client.bottom &&
+            hiddenOrigin.x == gameOrigin.x && hiddenOrigin.y == gameOrigin.y)
+        {
+            LOG_INFO("Hidden DX11 swapchain window matches the game window: {}x{} at {},{} (child: {})",
+                     hiddenClient.right, hiddenClient.bottom, hiddenOrigin.x, hiddenOrigin.y, isChild);
+        }
+        else
+        {
+            LOG_WARN("Hidden DX11 swapchain window does not match the game window: {}x{} at {},{} vs {}x{} at {},{} "
+                     "(child: {}, owner thread {}, present thread {}, own pump thread: {}); ReShade's overlay will "
+                     "not take the mouse correctly",
+                     hiddenClient.right, hiddenClient.bottom, hiddenOrigin.x, hiddenOrigin.y, client.right,
+                     client.bottom, gameOrigin.x, gameOrigin.y, isChild, ownerThread, GetCurrentThreadId(),
+                     hasPumpThread);
+        }
     }
 }
 

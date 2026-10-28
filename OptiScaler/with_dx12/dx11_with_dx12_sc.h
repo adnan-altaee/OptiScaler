@@ -144,9 +144,16 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     UINT _reshadeCaptureHits = 0;
     UINT _reshadeCaptureMisses = 0;
 
-    // Last game-window client rect (screen coordinates) mirrored onto the hidden DX11 swapchain window
+    // Last game-window client rect mirrored onto the hidden DX11 swapchain window (parent client coordinates
+    // once it is a child of the game window, screen coordinates before that)
     RECT _mirroredClientRect = {};
     HWND _hiddenWindow = nullptr;
+    UINT _hiddenWindowSyncFrame = 0;
+    UINT _hiddenWindowAttachRequests = 0;
+    UINT _hiddenWindowLastAttachFrame = 0;
+    UINT _hiddenWindowVerifyFrame = 0;
+    bool _hiddenWindowAttachLogged = false;
+    bool _hiddenWindowVerifyLogged = false;
 
     HWND _handle = nullptr;
 };

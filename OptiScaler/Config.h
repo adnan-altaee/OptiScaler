@@ -563,6 +563,9 @@ class Config
     // Dx11wDx12 FG swapchain: when ReShade wraps the hidden DX11 swapchain, present it first and capture the
     // back buffer from ReShade's reshade_present event, so ReShade's effects and overlay reach the FG output
     CustomOptional<bool> Dx11wDx12CaptureAfterReShade { true };
+    // With ReShade capture active, make the hidden DX11 swapchain window a hidden child of the game window, so
+    // ReShade routes the game window's mouse messages to its overlay (it only knows the hidden window)
+    CustomOptional<bool> Dx11wDx12ParentHiddenWindow { true };
 
     // vulkanwdx12
     CustomOptional<bool> VulkanUseCopyForInputs { false };

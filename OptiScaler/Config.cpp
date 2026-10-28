@@ -669,6 +669,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             Dx11DelayedInit.set_from_config(readInt("Dx11withDx12", "UseDelayedInit"));
             DontUseNTShared.set_from_config(readBool("Dx11withDx12", "DontUseNTShared"));
             Dx11wDx12CaptureAfterReShade.set_from_config(readBool("Dx11withDx12", "CaptureAfterReShade"));
+            Dx11wDx12ParentHiddenWindow.set_from_config(readBool("Dx11withDx12", "ParentHiddenWindow"));
         }
 
         // NvApi
@@ -1849,6 +1850,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->DontUseNTShared.value_for_config()).c_str());
         ini.SetValue("Dx11withDx12", "CaptureAfterReShade",
                      GetBoolValue(Instance()->Dx11wDx12CaptureAfterReShade.value_for_config()).c_str());
+        ini.SetValue("Dx11withDx12", "ParentHiddenWindow",
+                     GetBoolValue(Instance()->Dx11wDx12ParentHiddenWindow.value_for_config()).c_str());
     }
 
     // Logging
