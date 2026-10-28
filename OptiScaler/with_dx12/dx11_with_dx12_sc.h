@@ -89,6 +89,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     UINT _GetDx11BackBufferIndexForPresent() const;
     void _AdvanceFakeBackBufferIndex();
     bool _WaitForInteropCopyOnPresentQueue();
+    void _SyncHiddenWindowToGameWindow();
 
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
@@ -142,6 +143,10 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _capturedFromReShade = false;
     UINT _reshadeCaptureHits = 0;
     UINT _reshadeCaptureMisses = 0;
+
+    // Last game-window client rect (screen coordinates) mirrored onto the hidden DX11 swapchain window
+    RECT _mirroredClientRect = {};
+    HWND _hiddenWindow = nullptr;
 
     HWND _handle = nullptr;
 };

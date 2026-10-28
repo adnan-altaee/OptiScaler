@@ -497,6 +497,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         Config::Instance()->Dx11wDx12CaptureAfterReShade.value_or_default() &&
         (_reshadeCaptureHits > 0 || _reshadeCaptureMisses < 120) && ReShadeCapture::EnsureRegistered())
     {
+        // ReShade maps the mouse through the window of the swapchain it wraps (here the hidden window) and
+        // scales it by back buffer size / that window's client size, so the hidden window must mirror the
+        // game window's client area or every click lands far outside the overlay
+        _SyncHiddenWindowToGameWindow();
+
         ReShadeCapture::captureThread = GetCurrentThreadId();
         ReShadeCapture::captureTarget = this;
 
@@ -1183,6 +1188,48 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
 
     _openedDx11BackBufferStates[_currentFakeIndex] = D3D12_RESOURCE_STATE_COMMON;
     return true;
+}
+
+void Dx11wDx12SC::_SyncHiddenWindowToGameWindow()
+{
+    if (_real == nullptr || _handle == nullptr || !IsWindow(_handle))
+        return;
+
+    // The hidden window is the hidden DX11 swapchain's own output window (this wrapper's GetDesc reports the
+    // game window instead). misc/HiddenWindow.h keeps its handle in an 'inline static', i.e. one copy per
+    // translation unit, so it is read from the swapchain rather than from that global.
+    if (_hiddenWindow == nullptr)
+    {
+        DXGI_SWAP_CHAIN_DESC realDesc = {};
+        if (FAILED(_real->GetDesc(&realDesc)) || realDesc.OutputWindow == nullptr || realDesc.OutputWindow == _handle)
+            return;
+
+        _hiddenWindow = realDesc.OutputWindow;
+    }
+
+    if (!IsWindow(_hiddenWindow))
+        return;
+
+    RECT client = {};
+    if (!GetClientRect(_handle, &client) || client.right <= 0 || client.bottom <= 0)
+        return;
+
+    POINT topLeft = { 0, 0 };
+    if (!ClientToScreen(_handle, &topLeft))
+        return;
+
+    const RECT screenRect = { topLeft.x, topLeft.y, topLeft.x + client.right, topLeft.y + client.bottom };
+    if (EqualRect(&screenRect, &_mirroredClientRect))
+        return;
+
+    // Stays hidden (no SWP_SHOWWINDOW). Async so a window owned by another thread never blocks the present.
+    if (SetWindowPos(_hiddenWindow, nullptr, screenRect.left, screenRect.top, client.right, client.bottom,
+                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_ASYNCWINDOWPOS))
+    {
+        _mirroredClientRect = screenRect;
+        LOG_INFO("Hidden DX11 swapchain window mirrors the game window: {}x{} at {},{}", client.right, client.bottom,
+                 screenRect.left, screenRect.top);
+    }
 }
 
 bool Dx11wDx12SC::CaptureReShadeBackBuffer(ID3D11Resource* backBuffer)
