@@ -114,3 +114,10 @@ jobs:
         archive: false
         compression-level: 0
         if-no-files-found: error
+
+    # Also publish the bare DLL (zipped by GitHub) so it can be checked and installed without 7-Zip
+    - uses: actions/upload-artifact@v7.0.0
+      with:
+        name: 'OptiScaler-dll'
+        path: '${{ github.workspace }}\x64\Release\a\OptiScaler.dll'
+        if-no-files-found: error
