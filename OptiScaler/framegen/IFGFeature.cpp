@@ -51,6 +51,7 @@ UINT64 IFGFeature::StartNewFrame()
 
     _resourceReady[fIndex].clear();
     _waitingExecute[fIndex] = false;
+    _cameraMatricesValid[fIndex] = false;
 
     _noUi[fIndex] = true;
     _noDistortionField[fIndex] = true;
@@ -238,6 +239,19 @@ void IFGFeature::SetCameraData(float cameraPosition[3], float cameraUp[3], float
     std::memcpy(_cameraUp[index], cameraUp, 3 * sizeof(float));
     std::memcpy(_cameraRight[index], cameraRight, 3 * sizeof(float));
     std::memcpy(_cameraForward[index], cameraForward, 3 * sizeof(float));
+}
+
+void IFGFeature::SetCameraMatrices(const float viewToClip[16], const float clipToView[16],
+                                   const float clipToPrevClip[16], const float prevClipToClip[16], int index)
+{
+    if (index < 0)
+        index = GetIndex();
+
+    std::memcpy(_cameraViewToClip[index], viewToClip, 16 * sizeof(float));
+    std::memcpy(_cameraClipToView[index], clipToView, 16 * sizeof(float));
+    std::memcpy(_cameraClipToPrevClip[index], clipToPrevClip, 16 * sizeof(float));
+    std::memcpy(_cameraPrevClipToClip[index], prevClipToClip, 16 * sizeof(float));
+    _cameraMatricesValid[index] = true;
 }
 
 void IFGFeature::SetFrameTimeDelta(double delta, int index)

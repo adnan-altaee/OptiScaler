@@ -159,17 +159,27 @@ bool DLSSG_Common::SetConstants(int fIndex, uint32_t frameId, uint32_t mvWidth, 
         constData.cameraUp = { 0.0f, 0.0f, 1.0f };
         constData.cameraRight = { 0.0f, 1.0f, 0.0f };
         constData.cameraFwd = { 1.0f, 0.0f, 0.0f };
-        constData.cameraPinholeOffset = { 0.0f, 0.0f };
-
-        auto prev = XMMatrixIdentity();
-
-        XMFLOAT4X4 temp;
-        XMStoreFloat4x4(&temp, prev);
-        memcpy(&constData.clipToLensClip, &temp, sizeof(sl::float4x4));
-        memcpy(&constData.clipToPrevClip, &temp, sizeof(sl::float4x4));
-        memcpy(&constData.prevClipToClip, &temp, sizeof(sl::float4x4));
     }
 
+    constData.cameraPinholeOffset = { 0.0f, 0.0f };
+
+    {
+        XMFLOAT4X4 identity;
+        XMStoreFloat4x4(&identity, XMMatrixIdentity());
+        memcpy(&constData.clipToLensClip, &identity, sizeof(sl::float4x4));
+        memcpy(&constData.clipToPrevClip, &identity, sizeof(sl::float4x4));
+        memcpy(&constData.prevClipToClip, &identity, sizeof(sl::float4x4));
+    }
+
+    if (_cameraMatricesValid[fIndex])
+    {
+        // The game's own camera (inputs/FG/Upscaler_Inputs_Dx11wDx12.cpp, misc/GameCamera.cpp)
+        memcpy(&constData.cameraViewToClip, _cameraViewToClip[fIndex], sizeof(sl::float4x4));
+        memcpy(&constData.clipToCameraView, _cameraClipToView[fIndex], sizeof(sl::float4x4));
+        memcpy(&constData.clipToPrevClip, _cameraClipToPrevClip[fIndex], sizeof(sl::float4x4));
+        memcpy(&constData.prevClipToClip, _cameraPrevClipToClip[fIndex], sizeof(sl::float4x4));
+    }
+    else
     {
         XMMATRIX cameraViewToClip {};
         XMMATRIX clipToCameraView {};

@@ -432,10 +432,11 @@ const std::vector<GameConfig> gameConfigs = {
     },
 
     // Assassin's Creed Origins (DX11): refuses a device created at feature level 11_1 and exits with
-    // "Unable to create a DX11 D3D Device with the required features" when OptiScaler hooks D3D11 first
+    // "Unable to create a DX11 D3D Device with the required features" when OptiScaler hooks D3D11 first.
+    // Frame generation gets the real camera from the game's PassParams constant buffer.
     {
         .exes = { "acorigins.exe" },
-        .quirks = { SkipD3D11FeatureLevelElevation },
+        .quirks = { SkipD3D11FeatureLevelElevation, AnvilPassParamsCamera },
     },
 
     // Prey 2017

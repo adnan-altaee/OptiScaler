@@ -9,6 +9,7 @@
 #include <hudfix/Hudfix_Dx11.h>
 #include <resource_tracking/ResTrack_dx11.h>
 #include "shaders/depth_scale/DS_Dx12.h"
+#include <misc/GameCamera.h>
 
 using namespace OptiMath;
 static DS_Dx12* DepthScaleDx11wDx12 = nullptr;
@@ -126,6 +127,24 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
 
     auto fgConstants = UpscalerInputs::GetFGConstants(feature);
 
+    // The upscaler's DepthInverted flag can be wrong for frame generation (a mod feeding DLSS may not set it):
+    // decide from the depth texels themselves
+    const bool gameCamera = GameCamera::IsEnabled();
+    if (Config::Instance()->Dx11wDx12DetectDepthInverted.value_or(gameCamera))
+    {
+        ID3D11Resource* depth = nullptr;
+        if (InParameters->Get(NVSDK_NGX_Parameter_Depth, &depth) != NVSDK_NGX_Result_Success)
+            InParameters->Get(NVSDK_NGX_Parameter_Depth, (void**) &depth);
+
+        GameCamera::ProbeDepth(Dx11WithDx12::GetD3D11DeviceContext(), depth, feature->RenderWidth(),
+                               feature->RenderHeight());
+
+        if (const int inverted = GameCamera::DepthInverted(); inverted == 1)
+            fgConstants.flags |= FG_Flags::InvertedDepth;
+        else if (inverted == 0)
+            fgConstants.flags.reset(FG_Flags::InvertedDepth);
+    }
+
     fg->EvaluateState(_dx12Device, fgConstants);
 
     // Not needed while FG or the option is off, its destructor defers the buffer release
@@ -148,6 +167,35 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
 
     auto aspectRatio = (float) feature->DisplayWidth() / (float) feature->DisplayHeight();
     fg->SetCameraValues(camera.cameraNear, camera.cameraFar, camera.cameraVFov, aspectRatio, camera.meterFactor);
+
+    // The game's real camera instead of the placeholder values above, when it can be read (misc/GameCamera.cpp)
+    if (gameCamera)
+    {
+        GameCameraFrame gameFrame {};
+        if (GameCamera::GetFrame(jitterX, jitterY, feature->RenderWidth(), feature->RenderHeight(), gameFrame))
+        {
+            float nearValue = gameFrame.nearPlane;
+            float farValue = gameFrame.farPlane;
+
+            // Same order as UpscalerInputs::GetCameraValues: swapped for inverted depth (FFX convention)
+            if (fgConstants.flags[FG_Flags::InvertedDepth])
+                std::swap(nearValue, farValue);
+
+            fg->SetCameraValues(nearValue, farValue, gameFrame.verticalFov, gameFrame.aspect, camera.meterFactor);
+            fg->SetCameraData(gameFrame.position, gameFrame.up, gameFrame.right, gameFrame.forward);
+            fg->SetCameraMatrices(gameFrame.viewToClip, gameFrame.clipToView, gameFrame.clipToPrevClip,
+                                  gameFrame.prevClipToClip);
+
+            if (gameFrame.cut)
+                reset = 1;
+        }
+        else
+        {
+            float zero[3] = {};
+            fg->SetCameraData(zero, zero, zero, zero);
+        }
+    }
+
     fg->SetFrameTimeDelta(State::Instance().lastFGFrameTime);
     fg->SetMVScale(mvScaleX, mvScaleY);
     fg->SetJitter(jitterX, jitterY);

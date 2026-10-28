@@ -63,6 +63,12 @@ class IFGFeature
     float _cameraRight[BUFFER_COUNT][3] {};    ///< The camera right normalized vector in world space.
     float _cameraForward[BUFFER_COUNT][3] {};  ///< The camera forward normalized vector in world space.
     float _meterFactor[BUFFER_COUNT] = {};
+    // The game's camera transforms, Streamline convention (row-major, row vectors, no jitter), when known
+    bool _cameraMatricesValid[BUFFER_COUNT] = {};
+    float _cameraViewToClip[BUFFER_COUNT][16] {};
+    float _cameraClipToView[BUFFER_COUNT][16] {};
+    float _cameraClipToPrevClip[BUFFER_COUNT][16] {};
+    float _cameraPrevClipToClip[BUFFER_COUNT][16] {};
     double _ftDelta[BUFFER_COUNT] = {};
     UINT64 _interpolationWidth[BUFFER_COUNT] = {};
     UINT _interpolationHeight[BUFFER_COUNT] = {};
@@ -153,6 +159,9 @@ class IFGFeature
                          int index = -1);
     void SetCameraData(float cameraPosition[3], float cameraUp[3], float cameraRight[3], float cameraForward[3],
                        int index = -1);
+    // Streamline convention: row-major, row vectors, no jitter. Cleared by StartNewFrame.
+    void SetCameraMatrices(const float viewToClip[16], const float clipToView[16], const float clipToPrevClip[16],
+                           const float prevClipToClip[16], int index = -1);
     void SetFrameTimeDelta(double delta, int index = -1);
     void SetReset(UINT reset, int index = -1);
     void SetInterpolationRect(UINT64 width, UINT height, int index = -1);

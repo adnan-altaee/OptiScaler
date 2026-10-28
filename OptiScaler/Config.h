@@ -570,6 +570,10 @@ class Config
     // Dx11wDx12HDR10InputIsPQ) to R10G10B10A2 PQ/BT.2020 and present the FG swapchain in HDR10
     CustomOptional<bool> Dx11wDx12HDR10Conversion { true };
     CustomOptional<bool> Dx11wDx12HDR10InputIsPQ { false };
+    // Frame generation camera from the game's constant buffers (misc/GameCamera.cpp), default from the game quirk
+    CustomOptional<bool, NoDefault> Dx11wDx12GameCamera;
+    // Detect the depth convention from sampled depth texels for frame generation, default on with GameCamera
+    CustomOptional<bool, NoDefault> Dx11wDx12DetectDepthInverted;
 
     // vulkanwdx12
     CustomOptional<bool> VulkanUseCopyForInputs { false };

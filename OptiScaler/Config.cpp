@@ -672,6 +672,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             Dx11wDx12ParentHiddenWindow.set_from_config(readBool("Dx11withDx12", "ParentHiddenWindow"));
             Dx11wDx12HDR10Conversion.set_from_config(readBool("Dx11withDx12", "HDR10Conversion"));
             Dx11wDx12HDR10InputIsPQ.set_from_config(readBool("Dx11withDx12", "HDR10InputIsPQ"));
+            Dx11wDx12GameCamera.set_from_config(readBool("Dx11withDx12", "GameCamera"));
+            Dx11wDx12DetectDepthInverted.set_from_config(readBool("Dx11withDx12", "DetectDepthInverted"));
         }
 
         // NvApi
@@ -1858,6 +1860,10 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->Dx11wDx12HDR10Conversion.value_for_config()).c_str());
         ini.SetValue("Dx11withDx12", "HDR10InputIsPQ",
                      GetBoolValue(Instance()->Dx11wDx12HDR10InputIsPQ.value_for_config()).c_str());
+        ini.SetValue("Dx11withDx12", "GameCamera",
+                     GetBoolValue(Instance()->Dx11wDx12GameCamera.value_for_config()).c_str());
+        ini.SetValue("Dx11withDx12", "DetectDepthInverted",
+                     GetBoolValue(Instance()->Dx11wDx12DetectDepthInverted.value_for_config()).c_str());
     }
 
     // Logging

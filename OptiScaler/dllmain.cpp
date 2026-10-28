@@ -1281,6 +1281,9 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::DLSSGFrameLatencyWaitable)
         stringQuirks.push_back("Request frame latency waitable swapchain for DLSSG");
 
+    if (quirks & GameQuirk::AnvilPassParamsCamera)
+        stringQuirks.push_back("Frame generation camera from the game's PassParams constant buffer");
+
     state->detectedQuirks.append_range(stringQuirks);
     for (auto& stringQuirk : stringQuirks)
         spdlog::info("Quirk: {}", stringQuirk);

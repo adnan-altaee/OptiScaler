@@ -15,6 +15,7 @@
 #include <misc/IdentifyGpu.h>
 #include <misc/HiddenWindow.h>
 #include <shaders/Shader_Common.h>
+#include <misc/GameCamera.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -177,6 +178,9 @@ static bool EnsureRegistered()
 
     registerEvent(reshade::addon_event::reshade_present, reinterpret_cast<void*>(&OnReShadePresent));
     registerEvent(reshade::addon_event::reshade_open_overlay, reinterpret_cast<void*>(&OnReShadeOpenOverlay));
+
+    // Frame generation camera from the game's constant buffers (misc/GameCamera.cpp)
+    GameCamera::RegisterReShadeEvents(reinterpret_cast<void*>(registerEvent));
 
     state = 1;
     LOG_INFO("Registered with ReShade; Dx11wDx12 will capture frames after ReShade's effects and overlay");
