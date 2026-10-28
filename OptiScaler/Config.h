@@ -578,6 +578,9 @@ class Config
     // Draw call merging (misc/DrawMerge_Dx11.cpp): consecutive DX11 indirect draws into NVAPI multi-draws,
     // default from the game quirk; can be switched at runtime from the menu
     CustomOptional<bool, NoDefault> DrawMergeEnabled;
+    // 0: off (hooks installed, nothing held back), 1: runs held back but issued as single draws (no NVAPI),
+    // 2: NVAPI multi-draws on the immediate context only, 3: NVAPI multi-draws everywhere. Runtime, from the menu.
+    CustomOptional<int> DrawMergeMode { 1 };
     // Hook ReShade's proxy context instead of the D3D11 runtime (merged draws also skip ReShade and its add-ons)
     CustomOptional<bool> DrawMergeAtReShadeLayer { false };
     // Also merge while graphics UAVs are bound

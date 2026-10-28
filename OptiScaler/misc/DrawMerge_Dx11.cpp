@@ -97,7 +97,13 @@ struct alignas(64) Slot
 
     bool uavBound = false;   // graphics UAVs bound (OMSetRenderTargetsAndUnorderedAccessViews)
     bool predicated = false; // SetPredication with a predicate
-    uint8_t variant = 0;
+
+    // Since the context's last FinishCommandList, for the error report if the next one fails
+    uint32_t listMdiCalls = 0;
+    uint32_t listMdiDraws = 0;
+    uint32_t listSingles = 0;
+    uint32_t listLongestRun = 0;
+    uint32_t listLastStride = 0;
 
     Counter seen { 0 };     // eligible indirect draws while merging is on
     Counter calls { 0 };    // calls issued for them
@@ -124,6 +130,14 @@ std::atomic<bool> g_installed { false };
 std::atomic<bool> g_active { false };
 std::atomic<bool> g_mdiUsable { false };
 std::atomic<uint64_t> g_nvapiErrors { 0 };
+std::atomic<uint64_t> g_listFailures { 0 };
+
+// 0: off (hooks pass everything through), 1: runs held back but issued as single draws (no NVAPI),
+// 2: NVAPI multi-draws on the immediate context only, 3: NVAPI multi-draws everywhere
+std::atomic<int> g_mode { 1 };
+
+// Highest mode still allowed: lowered for good when a command list with our draws fails to close
+std::atomic<int> g_modeCap { 3 };
 bool g_reshadeLayer = false;
 bool g_allowUavs = false;
 
@@ -159,7 +173,7 @@ Slot* FindSlot(const void* context)
     return nullptr;
 }
 
-Slot* GetOrCreateSlot(ID3D11DeviceContext* context, int variant)
+Slot* GetOrCreateSlot(ID3D11DeviceContext* context)
 {
     if (t_cacheContext == context)
         return t_cacheSlot;
@@ -190,7 +204,6 @@ Slot* GetOrCreateSlot(ID3D11DeviceContext* context, int variant)
                 i = (i + 1) & (kTableSize - 1);
 
             slot = new Slot();
-            slot->variant = static_cast<uint8_t>(variant);
             g_slots[i] = slot;
             g_keys[i].store(context, std::memory_order_release);
             ++g_tableUsed;
@@ -246,16 +259,6 @@ PFN_ClearState o_ClearState[kVariants] {};
 PFN_FinishCommandList o_FinishCommandList[kVariants] {};
 PFN_SwapDeviceContextState o_SwapDeviceContextState[kVariants] {};
 
-inline PFN_DrawIndirect DrawOriginal(bool indexed, int variant)
-{
-    auto fn = indexed ? o_DrawIndexedInstancedIndirect[variant] : o_DrawInstancedIndirect[variant];
-
-    if (fn == nullptr)
-        fn = indexed ? o_DrawIndexedInstancedIndirect[0] : o_DrawInstancedIndirect[0];
-
-    return fn;
-}
-
 void NoteNvapiError(NvStatus status)
 {
     const auto errors = g_nvapiErrors.fetch_add(1) + 1;
@@ -297,10 +300,11 @@ void FlushSlot(Slot* slot, ID3D11DeviceContext* context)
 
     ++t_inFlush;
 
-    const auto original = DrawOriginal(indexed, slot->variant);
     bool issued = false;
+    const int mode = g_mode.load(std::memory_order_relaxed);
 
-    if (count > 1 && g_mdiUsable.load(std::memory_order_relaxed))
+    if (count > 1 && mode >= 2 && g_mdiUsable.load(std::memory_order_relaxed) &&
+        (mode == 3 || context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE))
     {
         auto multiDraw = indexed ? g_nvMultiDrawIndexed : g_nvMultiDraw;
         ID3D11DeviceContext* nativeContext = context;
@@ -339,13 +343,29 @@ void FlushSlot(Slot* slot, ID3D11DeviceContext* context)
         Add(slot->calls);
         Add(slot->mdiCalls);
         Add(slot->mdiDraws, count);
+        slot->listMdiCalls++;
+        slot->listMdiDraws += count;
     }
     else
     {
+        // Through the context's own vtable: the right implementation for its type (immediate and deferred
+        // contexts have different draw functions). Our hook on it passes straight through while t_inFlush is set.
         for (uint32_t i = 0; i < count; ++i)
-            original(context, buffer, offset + i * stride);
+        {
+            if (indexed)
+                context->DrawIndexedInstancedIndirect(buffer, offset + i * stride);
+            else
+                context->DrawInstancedIndirect(buffer, offset + i * stride);
+        }
 
         Add(slot->calls, count);
+        slot->listSingles += count;
+    }
+
+    if (count > slot->listLongestRun)
+    {
+        slot->listLongestRun = count;
+        slot->listLastStride = stride;
     }
 
     Add(slot->runDraws[RunBucket(count)], count);
@@ -404,7 +424,7 @@ void STDMETHODCALLTYPE hkDrawIndirect(ID3D11DeviceContext* context, ID3D11Buffer
         return;
     }
 
-    Slot* slot = GetOrCreateSlot(context, V);
+    Slot* slot = GetOrCreateSlot(context);
 
     if (slot == nullptr)
     {
@@ -474,7 +494,7 @@ void STDMETHODCALLTYPE hkSetPredication(ID3D11DeviceContext* context, ID3D11Pred
 
     if (predicate != nullptr)
     {
-        if (auto slot = GetOrCreateSlot(context, V))
+        if (auto slot = GetOrCreateSlot(context))
             slot->predicated = true;
     }
     else if (auto slot = FindSlotCached(context))
@@ -526,7 +546,7 @@ void STDMETHODCALLTYPE hkOMSetRenderTargetsAndUnorderedAccessViews(
 
     if (anyUav)
     {
-        if (auto slot = GetOrCreateSlot(context, V))
+        if (auto slot = GetOrCreateSlot(context))
             slot->uavBound = true;
     }
     else if (auto slot = FindSlotCached(context))
@@ -572,17 +592,84 @@ HRESULT STDMETHODCALLTYPE hkFinishCommandList(ID3D11DeviceContext* context, BOOL
     FlushBeforeCall(context);
     const auto result = o_FinishCommandList[V](context, restoreDeferredContextState, commandList);
 
-    // Without restore, the deferred context starts the next command list from the default state
-    if (!restoreDeferredContextState)
+    auto slot = FindSlotCached(context);
+    auto finalResult = result;
+
+    if (FAILED(result))
     {
-        if (auto slot = FindSlotCached(context))
+        const auto failures = g_listFailures.fetch_add(1) + 1;
+        const bool ours = slot != nullptr && (slot->listMdiCalls != 0 || slot->listSingles != 0);
+
+        if (failures <= 8)
+        {
+            LOG_ERROR("Draw merge: FinishCommandList failed with {:X} on context {:X} (mode {}); in this command list: "
+                      "{} multi-draws with {} draws, {} single draws, longest run {} (stride {})",
+                      (UINT) result, (size_t) context, g_mode.load(), slot != nullptr ? slot->listMdiCalls : 0,
+                      slot != nullptr ? slot->listMdiDraws : 0, slot != nullptr ? slot->listSingles : 0,
+                      slot != nullptr ? slot->listLongestRun : 0, slot != nullptr ? slot->listLastStride : 0);
+            spdlog::default_logger()->flush();
+        }
+
+        if (ours)
+        {
+            // Never again what this list did: multi-draws -> hold back only, hold back only -> off
+            const int cap = slot->listMdiCalls != 0 ? 1 : 0;
+            int current = g_modeCap.load();
+            while (cap < current && !g_modeCap.compare_exchange_weak(current, cap))
+            {
+            }
+
+            if (g_mode.load() > cap)
+                g_mode.store(cap);
+
+            g_active.store(g_mode.load() >= 1);
+
+            // The game treats a failed FinishCommandList as fatal: give it an empty command list instead, so the
+            // worst case is one frame with that part missing
+            if (commandList != nullptr)
+            {
+                ID3D11Device* device = nullptr;
+                context->GetDevice(&device);
+
+                if (device != nullptr)
+                {
+                    ID3D11DeviceContext* emptyContext = nullptr;
+
+                    if (SUCCEEDED(device->CreateDeferredContext(0, &emptyContext)) && emptyContext != nullptr)
+                    {
+                        if (SUCCEEDED(emptyContext->FinishCommandList(FALSE, commandList)))
+                            finalResult = S_OK;
+
+                        emptyContext->Release();
+                    }
+
+                    device->Release();
+                }
+            }
+
+            LOG_ERROR("Draw merge: merging limited to mode {} from now on; command list replaced by an empty one: {}",
+                      cap, finalResult == S_OK);
+            spdlog::default_logger()->flush();
+        }
+    }
+
+    if (slot != nullptr)
+    {
+        slot->listMdiCalls = 0;
+        slot->listMdiDraws = 0;
+        slot->listSingles = 0;
+        slot->listLongestRun = 0;
+        slot->listLastStride = 0;
+
+        // Without restore, the deferred context starts the next command list from the default state
+        if (!restoreDeferredContextState)
         {
             slot->uavBound = false;
             slot->predicated = false;
         }
     }
 
-    return result;
+    return finalResult;
 }
 
 template <int V>
@@ -593,7 +680,7 @@ void STDMETHODCALLTYPE hkSwapDeviceContextState(ID3D11DeviceContext* context, ID
     o_SwapDeviceContextState[V](context, state, previousState);
 
     // The swapped-in state is unknown: don't merge until UAVs and predication are set again
-    if (auto slot = GetOrCreateSlot(context, V))
+    if (auto slot = GetOrCreateSlot(context))
     {
         slot->uavBound = true;
         slot->predicated = true;
@@ -931,6 +1018,15 @@ bool HookVtable(void** vtable, int variant, size_t length, std::vector<std::pair
 
         if (const auto existing = findHooked(address))
         {
+            const char* existingName = "?";
+            for (const auto& other : kHooks)
+            {
+                if (other.index == existing->second)
+                    existingName = other.name;
+            }
+
+            LOG_INFO("Draw merge: {} (variant {}) uses the same function as {}", entry.name, variant, existingName);
+
             if (existing->second == entry.index)
             {
                 // Same function as the immediate context's: its hook already handles this variant too
@@ -1161,6 +1257,7 @@ void UpdateStats()
     }
 
     DrawMergeDx11::Stats stats;
+    stats.mode = g_mode.load(std::memory_order_relaxed);
     stats.active = g_active.load(std::memory_order_relaxed);
     stats.reshadeLayer = g_reshadeLayer;
     stats.drawsPerFrame = delta.seen / frames;
@@ -1169,6 +1266,7 @@ void UpdateStats()
     stats.averageRun = delta.mdiCalls > 0 ? static_cast<double>(delta.mdiDraws) / delta.mdiCalls : 0.0;
     stats.blockedPerFrame = delta.blocked / frames;
     stats.nvapiErrors = g_nvapiErrors.load(std::memory_order_relaxed);
+    stats.listFailures = g_listFailures.load(std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lock(g_statsMutex);
@@ -1330,7 +1428,15 @@ void DrawMergeDx11::OnPresent(ID3D11DeviceContext* immediateContext)
     if (!g_installed.load(std::memory_order_relaxed))
         return;
 
-    g_active.store(IsEnabledByConfig() && g_mdiUsable.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    const int mode = std::min(std::clamp(Config::Instance()->DrawMergeMode.value_or_default(), 0, 3), g_modeCap.load());
+
+    if (mode != g_mode.load(std::memory_order_relaxed))
+    {
+        LOG_INFO("Draw merge: mode {} -> {}", g_mode.load(), mode);
+        g_mode.store(mode, std::memory_order_relaxed);
+    }
+
+    g_active.store(IsEnabledByConfig() && mode >= 1, std::memory_order_relaxed);
 
     if (immediateContext != nullptr)
     {

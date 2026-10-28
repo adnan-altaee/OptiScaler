@@ -3621,11 +3621,18 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ScopedIndent indent {};
             ImGui::Spacing();
 
-            if (bool merge = DrawMergeDx11::IsEnabledByConfig(); ImGui::Checkbox("Merge Indirect Draws", &merge))
-                config->DrawMergeEnabled = merge;
+            const char* modes[] = { "Off", "Hold back only (test, no NVAPI)", "Multi-draw on immediate context",
+                                    "Multi-draw everywhere" };
+            int mode = std::clamp(config->DrawMergeMode.value_or_default(), 0, 3);
+
+            if (ImGui::Combo("Merge Mode", &mode, modes, IM_ARRAYSIZE(modes)))
+                config->DrawMergeMode = mode;
 
             ShowTooltip("Combines the game's consecutive indirect draws into NVAPI multi-draw calls, "
-                        "to cut the CPU time spent per draw.\nTakes effect on the next frame.");
+                        "to cut the CPU time spent per draw.\n"
+                        "Hold back only: runs are collected but issued as single draws (tests the hooks).\n"
+                        "The game records its world on deferred contexts, so only 'everywhere' helps there.\n"
+                        "Takes effect on the next frame.");
 
             const auto stats = DrawMergeDx11::GetStats();
             ImGui::Text("Layer: %s", stats.reshadeLayer ? "ReShade proxy" : "D3D11 runtime");
@@ -3645,6 +3652,10 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
             if (stats.nvapiErrors > 0)
                 ImGui::TextColored(StatusWarn(), "NVAPI errors: %llu", (unsigned long long) stats.nvapiErrors);
+
+            if (stats.listFailures > 0)
+                ImGui::TextColored(StatusWarn(), "Command list failures: %llu (merge mode limited to %d)",
+                                   (unsigned long long) stats.listFailures, stats.mode);
 
             ImGui::Spacing();
             ImGui::Spacing();

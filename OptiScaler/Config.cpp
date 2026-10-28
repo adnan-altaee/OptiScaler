@@ -679,6 +679,9 @@ bool Config::Reload(std::filesystem::path iniPath)
         // Draw call merging
         {
             DrawMergeEnabled.set_from_config(readBool("DrawMerge", "Enabled"));
+            DrawMergeMode.set_from_config(readInt("DrawMerge", "Mode"));
+            if (DrawMergeMode.has_value() && (DrawMergeMode.value() < 0 || DrawMergeMode.value() > 3))
+                DrawMergeMode.reset();
             DrawMergeAtReShadeLayer.set_from_config(readBool("DrawMerge", "ReShadeLayer"));
             DrawMergeAllowUAVs.set_from_config(readBool("DrawMerge", "AllowUAVs"));
             DrawMergeStatsInterval.set_from_config(readInt("DrawMerge", "StatsInterval"));
@@ -1879,6 +1882,7 @@ bool Config::SaveIni()
     // Draw call merging
     {
         ini.SetValue("DrawMerge", "Enabled", GetBoolValue(Instance()->DrawMergeEnabled.value_for_config()).c_str());
+        ini.SetValue("DrawMerge", "Mode", GetIntValue(Instance()->DrawMergeMode.value_for_config()).c_str());
         ini.SetValue("DrawMerge", "ReShadeLayer",
                      GetBoolValue(Instance()->DrawMergeAtReShadeLayer.value_for_config()).c_str());
         ini.SetValue("DrawMerge", "AllowUAVs", GetBoolValue(Instance()->DrawMergeAllowUAVs.value_for_config()).c_str());
