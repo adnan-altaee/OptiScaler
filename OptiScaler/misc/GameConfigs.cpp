@@ -434,9 +434,12 @@ const std::vector<GameConfig> gameConfigs = {
     // Assassin's Creed Origins (DX11): refuses a device created at feature level 11_1 and exits with
     // "Unable to create a DX11 D3D Device with the required features" when OptiScaler hooks D3D11 first.
     // Frame generation gets the real camera from the game's PassParams constant buffer.
+    // 45k-60k indirect draws a frame in towns, all recorded on deferred contexts: merged into NVAPI multi-draws.
+    // HUDFix can't capture from deferred contexts, so its draw and bind hooks are not installed.
     {
         .exes = { "acorigins.exe" },
-        .quirks = { SkipD3D11FeatureLevelElevation, AnvilPassParamsCamera },
+        .defaults = { WithUpscalerFGInput(FGDisableHUDFix = true) },
+        .quirks = { SkipD3D11FeatureLevelElevation, AnvilPassParamsCamera, MergeIndirectDraws },
     },
 
     // Prey 2017

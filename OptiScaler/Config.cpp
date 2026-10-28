@@ -676,6 +676,16 @@ bool Config::Reload(std::filesystem::path iniPath)
             Dx11wDx12DetectDepthInverted.set_from_config(readBool("Dx11withDx12", "DetectDepthInverted"));
         }
 
+        // Draw call merging
+        {
+            DrawMergeEnabled.set_from_config(readBool("DrawMerge", "Enabled"));
+            DrawMergeAtReShadeLayer.set_from_config(readBool("DrawMerge", "ReShadeLayer"));
+            DrawMergeAllowUAVs.set_from_config(readBool("DrawMerge", "AllowUAVs"));
+            DrawMergeStatsInterval.set_from_config(readInt("DrawMerge", "StatsInterval"));
+            if (DrawMergeStatsInterval.has_value() && DrawMergeStatsInterval.value() < 0)
+                DrawMergeStatsInterval.reset();
+        }
+
         // NvApi
         {
             DisableFlipMetering.set_from_config(readBool("NvApi", "DisableFlipMetering"));
@@ -1864,6 +1874,16 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->Dx11wDx12GameCamera.value_for_config()).c_str());
         ini.SetValue("Dx11withDx12", "DetectDepthInverted",
                      GetBoolValue(Instance()->Dx11wDx12DetectDepthInverted.value_for_config()).c_str());
+    }
+
+    // Draw call merging
+    {
+        ini.SetValue("DrawMerge", "Enabled", GetBoolValue(Instance()->DrawMergeEnabled.value_for_config()).c_str());
+        ini.SetValue("DrawMerge", "ReShadeLayer",
+                     GetBoolValue(Instance()->DrawMergeAtReShadeLayer.value_for_config()).c_str());
+        ini.SetValue("DrawMerge", "AllowUAVs", GetBoolValue(Instance()->DrawMergeAllowUAVs.value_for_config()).c_str());
+        ini.SetValue("DrawMerge", "StatsInterval",
+                     GetIntValue(Instance()->DrawMergeStatsInterval.value_for_config()).c_str());
     }
 
     // Logging

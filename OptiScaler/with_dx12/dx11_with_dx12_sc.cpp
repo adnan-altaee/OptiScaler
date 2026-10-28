@@ -16,6 +16,7 @@
 #include <misc/HiddenWindow.h>
 #include <shaders/Shader_Common.h>
 #include <misc/GameCamera.h>
+#include <misc/DrawMerge_Dx11.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -345,6 +346,10 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
         ResTrack_Dx11::HookDevice(_dx11Device);
     }
 
+    // Merge the game's consecutive indirect draws into NVAPI multi-draws (once, for the game's device)
+    if (_dx11Device != nullptr && DrawMergeDx11::IsEnabledByConfig())
+        DrawMergeDx11::Install(_dx11Device);
+
     if (WithDx12::PrepareD3D12ForD3D11(_dx11Device, D3D_FEATURE_LEVEL_11_0))
     {
         _dx12Device = WithDx12::GetD3D12Device();
@@ -533,6 +538,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if ((Flags & DXGI_PRESENT_TEST) != 0)
         return _real->Present(SyncInterval, Flags);
+
+    // Before anything else uses the immediate context: a run of draws still held back there belongs to this frame
+    DrawMergeDx11::OnPresent(_dx11Context);
 
     const bool dx11HudfixPresent = Config::Instance()->FGHUDFix.value_or_default() &&
                                    State::Instance().activeFgInput == FGInput::Upscaler &&

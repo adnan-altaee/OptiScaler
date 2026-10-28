@@ -79,6 +79,7 @@ class IFGFeature
     UINT64 _frameCount = 0;
     UINT64 _lastDispatchedFrame = 0;
     UINT64 _lastFGFrame = 0;
+    UINT64 _frameJumpWarnings = 0; // consecutive "frame count jumped" resyncs, logged only for the first few
     bool _waitingNewFrameData = false;
     int _framesToInterpolate = -1;
     bool _generationOff = false; // Dynamic MFG 1X: frame generation switched off, the count above kept

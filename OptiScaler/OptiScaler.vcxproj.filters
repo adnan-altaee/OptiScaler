@@ -845,6 +845,9 @@
     <ClInclude Include="misc\GameCamera.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="misc\DrawMerge_Dx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\hud_copy\precompile\HudCopy_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1641,6 +1644,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="misc\GameCamera.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="misc\DrawMerge_Dx11.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp">

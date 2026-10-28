@@ -40,6 +40,7 @@
 #include <memory>
 #include <type_traits>
 #include <misc/IdentifyGpu.h>
+#include <misc/DrawMerge_Dx11.h>
 #include <hooks/Amdxc64_Hooks.h>
 #include <low_latency/input/input_common.h>
 #include <hooks/Vulkan_Hooks.h>
@@ -3605,6 +3606,45 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             if (bool dontUseNTShared = config->DontUseNTShared.value_or_default();
                 ImGui::Checkbox("Don't Use NTShared", &dontUseNTShared))
                 config->DontUseNTShared = dontUseNTShared;
+
+            ImGui::Spacing();
+            ImGui::Spacing();
+        }
+    }
+
+    // Draw call merging (DX11 indirect draws into NVAPI multi-draws)
+    if (state.api == DX11 && DrawMergeDx11::IsInstalled())
+    {
+        ImGui::Spacing();
+        if (auto ch = ScopedCollapsingHeader("Draw Call Merging"); ch.IsHeaderOpen())
+        {
+            ScopedIndent indent {};
+            ImGui::Spacing();
+
+            if (bool merge = DrawMergeDx11::IsEnabledByConfig(); ImGui::Checkbox("Merge Indirect Draws", &merge))
+                config->DrawMergeEnabled = merge;
+
+            ShowTooltip("Combines the game's consecutive indirect draws into NVAPI multi-draw calls, "
+                        "to cut the CPU time spent per draw.\nTakes effect on the next frame.");
+
+            const auto stats = DrawMergeDx11::GetStats();
+            ImGui::Text("Layer: %s", stats.reshadeLayer ? "ReShade proxy" : "D3D11 runtime");
+
+            if (stats.active)
+            {
+                ImGui::Text("%.0f indirect draws -> %.0f calls per frame", stats.drawsPerFrame, stats.callsPerFrame);
+                ImGui::Text("%.1f%% in multi-draws, average run %.1f", 100.0 * stats.mergedShare, stats.averageRun);
+
+                if (stats.blockedPerFrame > 0.5)
+                    ImGui::Text("%.0f per frame not merged (UAVs or predicate bound)", stats.blockedPerFrame);
+            }
+            else
+            {
+                ImGui::Text("Off");
+            }
+
+            if (stats.nvapiErrors > 0)
+                ImGui::TextColored(StatusWarn(), "NVAPI errors: %llu", (unsigned long long) stats.nvapiErrors);
 
             ImGui::Spacing();
             ImGui::Spacing();

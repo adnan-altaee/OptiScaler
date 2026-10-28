@@ -40,8 +40,16 @@ UINT64 IFGFeature::StartNewFrame()
 
     if (_lastDispatchedFrame == 0 || (_frameCount - _lastDispatchedFrame) > 2)
     {
-        LOG_WARN("Frame count jumped too much! _frameCount: {}, _lastDispatchedFrame: {}", _frameCount,
-                 _lastDispatchedFrame);
+        // Happens every other frame while frame generation is off but the upscaler keeps starting frames
+        if (++_frameJumpWarnings <= 3)
+        {
+            LOG_WARN("Frame count jumped too much! _frameCount: {}, _lastDispatchedFrame: {}", _frameCount,
+                     _lastDispatchedFrame);
+        }
+        else if (_frameJumpWarnings == 4)
+        {
+            LOG_WARN("Frame count keeps jumping (frame generation not dispatching), not logging it until it does");
+        }
 
         _lastDispatchedFrame = _frameCount - 1;
     }
@@ -158,6 +166,7 @@ int IFGFeature::GetDispatchIndex(UINT64& willDispatchFrame)
 
     _lastDispatchedFrame = willDispatchFrame;
     _lastFGFrame = State::Instance().fgLastFrame;
+    _frameJumpWarnings = 0;
 
     return (willDispatchFrame % BUFFER_COUNT);
 }
