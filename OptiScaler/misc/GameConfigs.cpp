@@ -431,6 +431,13 @@ const std::vector<GameConfig> gameConfigs = {
         .quirks = { SkipD3D11FeatureLevelElevation },
     },
 
+    // Assassin's Creed Origins (DX11): refuses a device created at feature level 11_1 and exits with
+    // "Unable to create a DX11 D3D Device with the required features" when OptiScaler hooks D3D11 first
+    {
+        .exes = { "acorigins.exe" },
+        .quirks = { SkipD3D11FeatureLevelElevation },
+    },
+
     // Prey 2017
     // Requires Prey Luma Remastered mod for upscalers
     {
