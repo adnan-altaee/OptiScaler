@@ -110,6 +110,7 @@ struct alignas(64) Slot
     Counter mdiCalls { 0 }; // NVAPI multi-draws
     Counter mdiDraws { 0 }; // draws inside them
     Counter blocked { 0 };  // draws passed straight through because of UAVs or a predicate
+    Counter bypassed { 0 }; // draws of a run sent to the native context, past ReShade (mode 4)
     Counter runDraws[kRunBuckets] {};
 };
 
@@ -133,11 +134,14 @@ std::atomic<uint64_t> g_nvapiErrors { 0 };
 std::atomic<uint64_t> g_listFailures { 0 };
 
 // 0: off (hooks pass everything through), 1: runs held back but issued as single draws (no NVAPI),
-// 2: NVAPI multi-draws on the immediate context only, 3: NVAPI multi-draws everywhere
-std::atomic<int> g_mode { 1 };
+// 2: NVAPI multi-draws on the immediate context only, 3: NVAPI multi-draws everywhere (both remove the device on
+// current NVIDIA drivers with this game), 4: single draws, but every draw of a run after the first goes straight to
+// the native context, past ReShade and its add-ons (needs the ReShade layer)
+constexpr int kMaxMode = 4;
+std::atomic<int> g_mode { 0 };
 
 // Highest mode still allowed: lowered for good when a command list with our draws fails to close
-std::atomic<int> g_modeCap { 3 };
+std::atomic<int> g_modeCap { kMaxMode };
 
 // Issue the first draw of a run as a normal draw before the multi-draw (Config DrawMergePrimeRuns)
 std::atomic<bool> g_primeRuns { true };
@@ -316,8 +320,9 @@ void FlushSlot(Slot* slot, ID3D11DeviceContext* context)
     ++t_inFlush;
 
     const int mode = g_mode.load(std::memory_order_relaxed);
-    const bool useMultiDraw = count > 1 && mode >= 2 && g_mdiUsable.load(std::memory_order_relaxed) &&
+    const bool useMultiDraw = count > 1 && (mode == 2 || mode == 3) && g_mdiUsable.load(std::memory_order_relaxed) &&
                               (mode == 3 || context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
+    const bool bypassReShade = count > 1 && mode == 4 && g_reshadeLayer;
 
     // Draws issued normally before the multi-draw: with PrimeRuns the first one, so the driver applies the
     // context's pending state through its normal draw path before the multi-draw uses it
@@ -341,9 +346,44 @@ void FlushSlot(Slot* slot, ID3D11DeviceContext* context)
         slot->listSingles += to - from;
     };
 
-    issueSingles(0, first);
-
     bool issued = false;
+
+    if (bypassReShade)
+    {
+        // The first draw through ReShade, so ReShade and its add-ons see the run with its state; the rest go to
+        // the native context directly (its functions are not hooked in the ReShade layer)
+        issueSingles(0, 1);
+
+        ID3D11DeviceContext* nativeContext = nullptr;
+
+        if (SUCCEEDED(context->QueryInterface(IID_ReShadeUnwrappedObject, reinterpret_cast<void**>(&nativeContext))) &&
+            nativeContext != nullptr)
+        {
+            for (uint32_t i = 1; i < count; ++i)
+            {
+                if (indexed)
+                    nativeContext->DrawIndexedInstancedIndirect(buffer, offset + i * stride);
+                else
+                    nativeContext->DrawInstancedIndirect(buffer, offset + i * stride);
+            }
+
+            nativeContext->Release();
+
+            Add(slot->calls, count - 1);
+            Add(slot->bypassed, count - 1);
+            slot->listSingles += count - 1;
+        }
+        else
+        {
+            issueSingles(1, count);
+        }
+
+        issued = true;
+    }
+    else
+    {
+        issueSingles(0, first);
+    }
 
     if (useMultiDraw)
     {
@@ -1278,6 +1318,7 @@ struct Totals
     uint64_t mdiCalls = 0;
     uint64_t mdiDraws = 0;
     uint64_t blocked = 0;
+    uint64_t bypassed = 0;
     uint64_t runDraws[kRunBuckets] = {};
 };
 
@@ -1296,6 +1337,7 @@ Totals SumSlots()
         totals.mdiCalls += slot->mdiCalls.load(std::memory_order_relaxed);
         totals.mdiDraws += slot->mdiDraws.load(std::memory_order_relaxed);
         totals.blocked += slot->blocked.load(std::memory_order_relaxed);
+        totals.bypassed += slot->bypassed.load(std::memory_order_relaxed);
 
         for (int b = 0; b < kRunBuckets; ++b)
             totals.runDraws[b] += slot->runDraws[b].load(std::memory_order_relaxed);
@@ -1338,6 +1380,7 @@ void UpdateStats()
     delta.mdiCalls = totals.mdiCalls - g_previousTotals.mdiCalls;
     delta.mdiDraws = totals.mdiDraws - g_previousTotals.mdiDraws;
     delta.blocked = totals.blocked - g_previousTotals.blocked;
+    delta.bypassed = totals.bypassed - g_previousTotals.bypassed;
 
     uint64_t runTotal = 0;
     for (int b = 0; b < kRunBuckets; ++b)
@@ -1355,6 +1398,7 @@ void UpdateStats()
     stats.mergedShare = delta.seen > 0 ? static_cast<double>(delta.mdiDraws) / static_cast<double>(delta.seen) : 0.0;
     stats.averageRun = delta.mdiCalls > 0 ? static_cast<double>(delta.mdiDraws) / delta.mdiCalls : 0.0;
     stats.blockedPerFrame = delta.blocked / frames;
+    stats.bypassedPerFrame = delta.bypassed / frames;
     stats.nvapiErrors = g_nvapiErrors.load(std::memory_order_relaxed);
     stats.listFailures = g_listFailures.load(std::memory_order_relaxed);
     stats.mdiImmediate = g_mdiImmediate.load(std::memory_order_relaxed);
@@ -1375,12 +1419,15 @@ void UpdateStats()
         auto share = [&](int bucket)
         { return runTotal > 0 ? 100.0 * static_cast<double>(delta.runDraws[bucket]) / runTotal : 0.0; };
 
-        LOG_INFO("Draw merge: {:.0f} indirect draws/frame -> {:.0f} calls ({:.1f}% in multi-draws, average run "
-                 "{:.1f}), {:.0f} not merged because of UAVs/predicate; draws by run length 1: {:.0f}%, 2-3: "
-                 "{:.0f}%, 4-7: {:.0f}%, 8-15: {:.0f}%, 16-63: {:.0f}%, 64+: {:.0f}%; NVAPI errors {}; {} fps",
-                 stats.drawsPerFrame, stats.callsPerFrame, 100.0 * stats.mergedShare, stats.averageRun,
-                 stats.blockedPerFrame, share(0), share(1), share(2), share(3), share(4), share(5), stats.nvapiErrors,
-                 static_cast<int>(frames / std::chrono::duration<double>(now - g_intervalStart).count() + 0.5));
+        LOG_INFO(
+            "Draw merge: mode {}, {:.0f} indirect draws/frame -> {:.0f} calls ({:.1f}% in multi-draws, average "
+            "run {:.1f}), {:.0f} past ReShade, {:.0f} not merged because of UAVs/predicate; draws by run length "
+            "1: {:.0f}%, 2-3: {:.0f}%, 4-7: {:.0f}%, 8-15: {:.0f}%, 16-63: {:.0f}%, 64+: {:.0f}%; NVAPI errors {}; "
+            "{} fps",
+            stats.mode, stats.drawsPerFrame, stats.callsPerFrame, 100.0 * stats.mergedShare, stats.averageRun,
+            stats.bypassedPerFrame, stats.blockedPerFrame, share(0), share(1), share(2), share(3), share(4), share(5),
+            stats.nvapiErrors,
+            static_cast<int>(frames / std::chrono::duration<double>(now - g_intervalStart).count() + 0.5));
     }
 
     g_previousTotals = totals;
@@ -1563,7 +1610,12 @@ void DrawMergeDx11::OnPresent(ID3D11DeviceContext* immediateContext)
     if (!g_installed.load(std::memory_order_relaxed))
         return;
 
-    const int mode = std::min(std::clamp(Config::Instance()->DrawMergeMode.value_or_default(), 0, 3), g_modeCap.load());
+    int mode =
+        std::min(std::clamp(Config::Instance()->DrawMergeMode.value_or_default(), 0, kMaxMode), g_modeCap.load());
+
+    // Mode 4 needs the hooks above ReShade
+    if (mode == 4 && !g_reshadeLayer)
+        mode = 1;
 
     if (mode != g_mode.load(std::memory_order_relaxed))
     {

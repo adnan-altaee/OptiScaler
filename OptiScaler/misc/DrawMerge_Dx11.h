@@ -45,14 +45,15 @@ void OnPresent(ID3D11DeviceContext* immediateContext);
 
 struct Stats
 {
-    int mode = 0;                 // Config DrawMergeMode in use (0 off, 1 hold back only, 2 NVAPI on immediate, 3 all)
-    bool active = false;          // merging currently on
-    bool reshadeLayer = false;    // hooks on ReShade's proxy context instead of the native runtime
-    double drawsPerFrame = 0.0;   // eligible indirect draws seen
-    double callsPerFrame = 0.0;   // calls issued for them (multi-draws + single draws)
-    double mergedShare = 0.0;     // share of draws that went out in a multi-draw
-    double averageRun = 0.0;      // draws per multi-draw
-    double blockedPerFrame = 0.0; // draws not merged because UAVs or a predicate were bound
+    int mode = 0;        // Config DrawMergeMode in use (0 off, 1 hold back, 2/3 NVAPI multi-draw, 4 runs past ReShade)
+    bool active = false; // merging currently on
+    bool reshadeLayer = false;     // hooks on ReShade's proxy context instead of the native runtime
+    double drawsPerFrame = 0.0;    // eligible indirect draws seen
+    double callsPerFrame = 0.0;    // calls issued for them (multi-draws + single draws)
+    double mergedShare = 0.0;      // share of draws that went out in a multi-draw
+    double averageRun = 0.0;       // draws per multi-draw
+    double blockedPerFrame = 0.0;  // draws not merged because UAVs or a predicate were bound
+    double bypassedPerFrame = 0.0; // draws of runs sent past ReShade (mode 4)
     uint64_t nvapiErrors = 0;
     uint64_t listFailures = 0; // FinishCommandList failures seen
     uint64_t mdiImmediate = 0; // multi-draws issued so far on the immediate context

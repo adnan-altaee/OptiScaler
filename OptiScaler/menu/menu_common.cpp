@@ -3621,21 +3621,30 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ScopedIndent indent {};
             ImGui::Spacing();
 
-            const char* modes[] = { "Off", "Hold back only (test, no NVAPI)", "Multi-draw on immediate context",
-                                    "Multi-draw everywhere" };
-            int mode = std::clamp(config->DrawMergeMode.value_or_default(), 0, 3);
+            // NVAPI multi-draws (modes 2 and 3) remove the device with Origins on current drivers: ini only
+            const char* modeNames[] = { "Off", "Hold back only (test)", "NVAPI multi-draw, immediate (unstable)",
+                                        "NVAPI multi-draw, all (unstable)", "Skip ReShade inside runs" };
+            const int currentMode = std::clamp(config->DrawMergeMode.value_or_default(), 0, 4);
 
-            if (ImGui::Combo("Merge Mode", &mode, modes, IM_ARRAYSIZE(modes)))
-                config->DrawMergeMode = mode;
+            if (ImGui::BeginCombo("Merge Mode", modeNames[currentMode]))
+            {
+                for (int value : { 0, 1, 4 })
+                {
+                    if (ImGui::Selectable(modeNames[value], value == currentMode))
+                        config->DrawMergeMode = value;
+                }
 
-            ShowTooltip("Combines the game's consecutive indirect draws into NVAPI multi-draw calls, "
-                        "to cut the CPU time spent per draw.\n"
-                        "Hold back only: runs are collected but issued as single draws (tests the hooks).\n"
-                        "The game records its world on deferred contexts, so only 'everywhere' helps there.\n"
-                        "Takes effect on the next frame.");
+                ImGui::EndCombo();
+            }
+
+            ShowTooltip("Off: the hooks pass every call through.\n"
+                        "Hold back only: runs of consecutive indirect draws are collected and issued one by one "
+                        "(tests the hooks).\n"
+                        "Skip ReShade inside runs: the first draw of each run goes through ReShade and its add-ons, "
+                        "the rest straight to the driver.\nTakes effect on the next frame.");
 
             if (bool prime = config->DrawMergePrimeRuns.value_or_default();
-                ImGui::Checkbox("Prime Runs With A Normal Draw", &prime))
+                ImGui::Checkbox("Prime NVAPI Runs With A Normal Draw", &prime))
                 config->DrawMergePrimeRuns = prime;
 
             ShowTooltip("The first draw of each run goes through the normal draw path before the multi-draw.");
@@ -3661,6 +3670,9 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             {
                 ImGui::Text("%.0f indirect draws -> %.0f calls per frame", stats.drawsPerFrame, stats.callsPerFrame);
                 ImGui::Text("%.1f%% in multi-draws, average run %.1f", 100.0 * stats.mergedShare, stats.averageRun);
+
+                if (stats.bypassedPerFrame > 0.5)
+                    ImGui::Text("%.0f draws per frame skipped ReShade", stats.bypassedPerFrame);
 
                 if (stats.blockedPerFrame > 0.5)
                     ImGui::Text("%.0f per frame not merged (UAVs or predicate bound)", stats.blockedPerFrame);

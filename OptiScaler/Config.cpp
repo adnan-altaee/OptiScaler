@@ -680,7 +680,7 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             DrawMergeEnabled.set_from_config(readBool("DrawMerge", "Enabled"));
             DrawMergeMode.set_from_config(readInt("DrawMerge", "Mode"));
-            if (DrawMergeMode.has_value() && (DrawMergeMode.value() < 0 || DrawMergeMode.value() > 3))
+            if (DrawMergeMode.has_value() && (DrawMergeMode.value() < 0 || DrawMergeMode.value() > 4))
                 DrawMergeMode.reset();
             DrawMergePrimeRuns.set_from_config(readBool("DrawMerge", "PrimeRuns"));
             DrawMergeMaxRun.set_from_config(readInt("DrawMerge", "MaxRun"));
