@@ -581,6 +581,10 @@ class Config
     // 0: off (hooks installed, nothing held back), 1: runs held back but issued as single draws (no NVAPI),
     // 2: NVAPI multi-draws on the immediate context only, 3: NVAPI multi-draws everywhere. Runtime, from the menu.
     CustomOptional<int> DrawMergeMode { 1 };
+    // Issue the first draw of each run as a normal draw before the multi-draw
+    CustomOptional<bool> DrawMergePrimeRuns { true };
+    // Longest run merged into one multi-draw, 0 = no limit
+    CustomOptional<int> DrawMergeMaxRun { 0 };
     // Hook ReShade's proxy context instead of the D3D11 runtime (merged draws also skip ReShade and its add-ons)
     CustomOptional<bool> DrawMergeAtReShadeLayer { false };
     // Also merge while graphics UAVs are bound

@@ -138,6 +138,21 @@ std::atomic<int> g_mode { 1 };
 
 // Highest mode still allowed: lowered for good when a command list with our draws fails to close
 std::atomic<int> g_modeCap { 3 };
+
+// Issue the first draw of a run as a normal draw before the multi-draw (Config DrawMergePrimeRuns)
+std::atomic<bool> g_primeRuns { true };
+// Longest run merged into one multi-draw, 0 = no limit (Config DrawMergeMaxRun)
+std::atomic<uint32_t> g_maxRun { 0 };
+
+std::atomic<uint64_t> g_mdiImmediate { 0 };
+std::atomic<uint64_t> g_mdiDeferred { 0 };
+bool g_deviceRemovedLogged = false;
+
+// Native devices NvAPI_D3D_RegisterDevice was called for, and deferred contexts created by the game
+std::mutex g_nvapiMutex;
+std::vector<void*> g_registeredDevices;
+int g_nvapiLoadState = 0; // 0 not tried, 1 loaded, -1 unavailable
+std::atomic<int> g_deferredContextsCreated { 0 };
 bool g_reshadeLayer = false;
 bool g_allowUavs = false;
 
@@ -300,12 +315,41 @@ void FlushSlot(Slot* slot, ID3D11DeviceContext* context)
 
     ++t_inFlush;
 
-    bool issued = false;
     const int mode = g_mode.load(std::memory_order_relaxed);
+    const bool useMultiDraw = count > 1 && mode >= 2 && g_mdiUsable.load(std::memory_order_relaxed) &&
+                              (mode == 3 || context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
 
-    if (count > 1 && mode >= 2 && g_mdiUsable.load(std::memory_order_relaxed) &&
-        (mode == 3 || context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE))
+    // Draws issued normally before the multi-draw: with PrimeRuns the first one, so the driver applies the
+    // context's pending state through its normal draw path before the multi-draw uses it
+    uint32_t first = 0;
+    if (useMultiDraw && count >= 3 && g_primeRuns.load(std::memory_order_relaxed))
+        first = 1;
+
+    auto issueSingles = [&](uint32_t from, uint32_t to)
     {
+        // Through the context's own vtable: the right implementation for its type (immediate and deferred
+        // contexts have different draw functions). Our hook on it passes straight through while t_inFlush is set.
+        for (uint32_t i = from; i < to; ++i)
+        {
+            if (indexed)
+                context->DrawIndexedInstancedIndirect(buffer, offset + i * stride);
+            else
+                context->DrawInstancedIndirect(buffer, offset + i * stride);
+        }
+
+        Add(slot->calls, to - from);
+        slot->listSingles += to - from;
+    };
+
+    issueSingles(0, first);
+
+    bool issued = false;
+
+    if (useMultiDraw)
+    {
+        const uint32_t multiCount = count - first;
+        const uint32_t multiOffset = offset + first * stride;
+
         auto multiDraw = indexed ? g_nvMultiDrawIndexed : g_nvMultiDraw;
         ID3D11DeviceContext* nativeContext = context;
         bool unwrapped = false;
@@ -320,12 +364,12 @@ void FlushSlot(Slot* slot, ID3D11DeviceContext* context)
 
         if (multiDraw != nullptr && nativeContext != nullptr)
         {
-            auto status = multiDraw(nativeContext, count, buffer, offset, stride);
+            auto status = multiDraw(nativeContext, multiCount, buffer, multiOffset, stride);
 
             if (status == kNvDeviceNotRegistered)
             {
                 RegisterDeviceOf(nativeContext);
-                status = multiDraw(nativeContext, count, buffer, offset, stride);
+                status = multiDraw(nativeContext, multiCount, buffer, multiOffset, stride);
             }
 
             if (status == kNvOk)
@@ -336,31 +380,24 @@ void FlushSlot(Slot* slot, ID3D11DeviceContext* context)
 
         if (unwrapped)
             nativeContext->Release();
-    }
 
-    if (issued)
-    {
-        Add(slot->calls);
-        Add(slot->mdiCalls);
-        Add(slot->mdiDraws, count);
-        slot->listMdiCalls++;
-        slot->listMdiDraws += count;
-    }
-    else
-    {
-        // Through the context's own vtable: the right implementation for its type (immediate and deferred
-        // contexts have different draw functions). Our hook on it passes straight through while t_inFlush is set.
-        for (uint32_t i = 0; i < count; ++i)
+        if (issued)
         {
-            if (indexed)
-                context->DrawIndexedInstancedIndirect(buffer, offset + i * stride);
-            else
-                context->DrawInstancedIndirect(buffer, offset + i * stride);
-        }
+            Add(slot->calls);
+            Add(slot->mdiCalls);
+            Add(slot->mdiDraws, multiCount);
+            slot->listMdiCalls++;
+            slot->listMdiDraws += multiCount;
 
-        Add(slot->calls, count);
-        slot->listSingles += count;
+            if (context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+                g_mdiImmediate.fetch_add(1, std::memory_order_relaxed);
+            else
+                g_mdiDeferred.fetch_add(1, std::memory_order_relaxed);
+        }
     }
+
+    if (!issued)
+        issueSingles(first, count);
 
     if (count > slot->listLongestRun)
     {
@@ -450,6 +487,9 @@ void STDMETHODCALLTYPE hkDrawIndirect(ID3D11DeviceContext* context, ID3D11Buffer
     {
         if (slot->indexed == Indexed && slot->buffer == args)
         {
+            const uint32_t maxRun = g_maxRun.load(std::memory_order_relaxed);
+            const uint32_t runLimit = maxRun >= 2 ? maxRun : kMaxRun;
+
             if (slot->count == 1)
             {
                 constexpr uint32_t minStride = Indexed ? kMinStrideIndexed : kMinStride;
@@ -466,7 +506,7 @@ void STDMETHODCALLTYPE hkDrawIndirect(ID3D11DeviceContext* context, ID3D11Buffer
                     }
                 }
             }
-            else if (slot->count < kMaxRun &&
+            else if (slot->count < runLimit &&
                      static_cast<uint64_t>(slot->offset) + static_cast<uint64_t>(slot->count) * slot->stride == offset)
             {
                 slot->count++;
@@ -1123,8 +1163,14 @@ bool HookVtable(void** vtable, int variant, size_t length, std::vector<std::pair
     return false;
 }
 
-bool InitNvApi(ID3D11Device* nativeDevice)
+// Loads NVAPI and the functions used here, once. Call with g_nvapiMutex held.
+bool LoadNvApiLocked()
 {
+    if (g_nvapiLoadState != 0)
+        return g_nvapiLoadState > 0;
+
+    g_nvapiLoadState = -1;
+
     auto nvapi = NtdllProxy::LoadLibraryExW_Ldr(L"nvapi64.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
 
     if (nvapi == nullptr)
@@ -1161,7 +1207,7 @@ bool InitNvApi(ID3D11Device* nativeDevice)
         return false;
     }
 
-    auto status = initialize();
+    const auto status = initialize();
 
     if (status != kNvOk)
     {
@@ -1169,13 +1215,57 @@ bool InitNvApi(ID3D11Device* nativeDevice)
         return false;
     }
 
-    status = g_nvRegisterDevice(nativeDevice);
-    LOG_INFO("Draw merge: NvAPI_D3D_RegisterDevice for {:X}: {}", (size_t) nativeDevice, status);
+    g_nvapiLoadState = 1;
+    return true;
+}
+
+bool IsRegisteredDevice(const void* nativeDevice)
+{
+    std::lock_guard<std::mutex> lock(g_nvapiMutex);
+    return std::find(g_registeredDevices.begin(), g_registeredDevices.end(), nativeDevice) != g_registeredDevices.end();
+}
+
+// NvAPI_D3D_RegisterDevice for a native device, once per device
+bool RegisterNativeDevice(ID3D11Device* nativeDevice, const char* when)
+{
+    std::lock_guard<std::mutex> lock(g_nvapiMutex);
+
+    if (!LoadNvApiLocked())
+        return false;
+
+    // Always registered again: a device at the address of an earlier (destroyed) one is a new device
+    const auto status = g_nvRegisterDevice(nativeDevice);
+    LOG_INFO("Draw merge: NvAPI_D3D_RegisterDevice for {:X} ({}, {} deferred contexts created before): {}",
+             (size_t) nativeDevice, when, g_deferredContextsCreated.load(), status);
 
     if (status != kNvOk)
         return false;
 
+    if (std::find(g_registeredDevices.begin(), g_registeredDevices.end(), nativeDevice) == g_registeredDevices.end())
+        g_registeredDevices.push_back(nativeDevice);
+
     return true;
+}
+
+bool InitNvApi(ID3D11Device* nativeDevice) { return RegisterNativeDevice(nativeDevice, "at install"); }
+
+// Logs when the game creates its deferred contexts, relative to the NVAPI registration of their device
+using PFN_CreateDeferredContext = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, UINT, ID3D11DeviceContext**);
+PFN_CreateDeferredContext o_CreateDeferredContext = nullptr;
+
+HRESULT STDMETHODCALLTYPE hkCreateDeferredContext(ID3D11Device* device, UINT flags, ID3D11DeviceContext** context)
+{
+    const auto result = o_CreateDeferredContext(device, flags, context);
+    const int created = g_deferredContextsCreated.fetch_add(1) + 1;
+
+    if (created <= 32)
+    {
+        LOG_INFO("Draw merge: deferred context {} created ({:X}) on device {:X}, device NVAPI-registered: {}", created,
+                 context != nullptr && SUCCEEDED(result) ? (size_t) *context : 0, (size_t) device,
+                 IsRegisteredDevice(device));
+    }
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1267,6 +1357,8 @@ void UpdateStats()
     stats.blockedPerFrame = delta.blocked / frames;
     stats.nvapiErrors = g_nvapiErrors.load(std::memory_order_relaxed);
     stats.listFailures = g_listFailures.load(std::memory_order_relaxed);
+    stats.mdiImmediate = g_mdiImmediate.load(std::memory_order_relaxed);
+    stats.mdiDeferred = g_mdiDeferred.load(std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lock(g_statsMutex);
@@ -1423,6 +1515,49 @@ void DrawMergeDx11::Install(ID3D11Device* device)
     nativeDevice->Release();
 }
 
+void DrawMergeDx11::OnDeviceCreated(ID3D11Device* device)
+{
+    if (device == nullptr || !IsEnabledByConfig())
+        return;
+
+    ID3D11Device* nativeDevice = nullptr;
+
+    if (FAILED(device->QueryInterface(IID_ReShadeUnwrappedObject, reinterpret_cast<void**>(&nativeDevice))) ||
+        nativeDevice == nullptr)
+    {
+        nativeDevice = device;
+        nativeDevice->AddRef();
+    }
+
+    // Register before the game creates its deferred contexts
+    RegisterNativeDevice(nativeDevice, "at device creation");
+
+    // Log the game's deferred context creation (once, the function is shared by all devices)
+    static std::once_flag hookOnce;
+    std::call_once(hookOnce,
+                   [nativeDevice]()
+                   {
+                       void** vtable = *reinterpret_cast<void***>(nativeDevice);
+                       o_CreateDeferredContext = reinterpret_cast<PFN_CreateDeferredContext>(vtable[27]);
+
+                       DetourTransactionBegin();
+                       DetourUpdateThread(GetCurrentThread());
+
+                       if (DetourAttach(reinterpret_cast<void**>(&o_CreateDeferredContext),
+                                        reinterpret_cast<void*>(&hkCreateDeferredContext)) != NO_ERROR)
+                       {
+                           DetourTransactionAbort();
+                           LOG_WARN("Draw merge: could not hook CreateDeferredContext for logging");
+                       }
+                       else if (DetourTransactionCommit() != NO_ERROR)
+                       {
+                           LOG_WARN("Draw merge: could not hook CreateDeferredContext for logging");
+                       }
+                   });
+
+    nativeDevice->Release();
+}
+
 void DrawMergeDx11::OnPresent(ID3D11DeviceContext* immediateContext)
 {
     if (!g_installed.load(std::memory_order_relaxed))
@@ -1437,6 +1572,9 @@ void DrawMergeDx11::OnPresent(ID3D11DeviceContext* immediateContext)
     }
 
     g_active.store(IsEnabledByConfig() && mode >= 1, std::memory_order_relaxed);
+    g_primeRuns.store(Config::Instance()->DrawMergePrimeRuns.value_or_default(), std::memory_order_relaxed);
+    g_maxRun.store(static_cast<uint32_t>(std::max(0, Config::Instance()->DrawMergeMaxRun.value_or_default())),
+                   std::memory_order_relaxed);
 
     if (immediateContext != nullptr)
     {
@@ -1459,6 +1597,29 @@ void DrawMergeDx11::OnPresent(ID3D11DeviceContext* immediateContext)
 
         // A run still held back on the immediate context belongs to this frame
         FlushBeforeCall(layerContext);
+
+        if (!g_deviceRemovedLogged)
+        {
+            ID3D11Device* device = nullptr;
+            layerContext->GetDevice(&device);
+
+            if (device != nullptr)
+            {
+                const auto reason = device->GetDeviceRemovedReason();
+
+                if (reason != S_OK)
+                {
+                    g_deviceRemovedLogged = true;
+                    LOG_ERROR("Draw merge: device removed, reason {:X}; mode {}, prime runs {}, max run {}, "
+                              "multi-draws so far: {} on the immediate context, {} on deferred contexts",
+                              (UINT) reason, g_mode.load(), g_primeRuns.load(), g_maxRun.load(), g_mdiImmediate.load(),
+                              g_mdiDeferred.load());
+                    spdlog::default_logger()->flush();
+                }
+
+                device->Release();
+            }
+        }
 
         // If something replaced the context's vtable, the hooks no longer see its calls
         if (*reinterpret_cast<void***>(layerContext) != g_immediateVtable && !g_vtableChangeLogged)

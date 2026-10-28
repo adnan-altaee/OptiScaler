@@ -3634,6 +3634,26 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                         "The game records its world on deferred contexts, so only 'everywhere' helps there.\n"
                         "Takes effect on the next frame.");
 
+            if (bool prime = config->DrawMergePrimeRuns.value_or_default();
+                ImGui::Checkbox("Prime Runs With A Normal Draw", &prime))
+                config->DrawMergePrimeRuns = prime;
+
+            ShowTooltip("The first draw of each run goes through the normal draw path before the multi-draw.");
+
+            const char* maxRuns[] = { "No limit", "4", "16", "64", "256", "1024" };
+            const int maxRunValues[] = { 0, 4, 16, 64, 256, 1024 };
+            int maxRunIndex = 0;
+            for (int i = 0; i < IM_ARRAYSIZE(maxRunValues); ++i)
+            {
+                if (maxRunValues[i] == config->DrawMergeMaxRun.value_or_default())
+                    maxRunIndex = i;
+            }
+
+            if (ImGui::Combo("Max Run", &maxRunIndex, maxRuns, IM_ARRAYSIZE(maxRuns)))
+                config->DrawMergeMaxRun = maxRunValues[maxRunIndex];
+
+            ShowTooltip("Longest run of draws merged into one multi-draw.");
+
             const auto stats = DrawMergeDx11::GetStats();
             ImGui::Text("Layer: %s", stats.reshadeLayer ? "ReShade proxy" : "D3D11 runtime");
 
@@ -3644,6 +3664,9 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                 if (stats.blockedPerFrame > 0.5)
                     ImGui::Text("%.0f per frame not merged (UAVs or predicate bound)", stats.blockedPerFrame);
+
+                ImGui::Text("Multi-draws so far: %llu immediate, %llu deferred",
+                            (unsigned long long) stats.mdiImmediate, (unsigned long long) stats.mdiDeferred);
             }
             else
             {

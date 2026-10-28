@@ -31,6 +31,9 @@ namespace DrawMergeDx11
 // Config DrawMergeEnabled, by default on for games with the MergeIndirectDraws quirk
 bool IsEnabledByConfig();
 
+// At D3D11 device creation: registers the device with NVAPI before the game creates its deferred contexts
+void OnDeviceCreated(ID3D11Device* device);
+
 // Installs the hooks once, for the game's device (ReShade's proxy device is unwrapped when present)
 void Install(ID3D11Device* device);
 
@@ -52,6 +55,8 @@ struct Stats
     double blockedPerFrame = 0.0; // draws not merged because UAVs or a predicate were bound
     uint64_t nvapiErrors = 0;
     uint64_t listFailures = 0; // FinishCommandList failures seen
+    uint64_t mdiImmediate = 0; // multi-draws issued so far on the immediate context
+    uint64_t mdiDeferred = 0;  // and on deferred contexts
 };
 
 // Statistics of the last completed interval (about one second)
