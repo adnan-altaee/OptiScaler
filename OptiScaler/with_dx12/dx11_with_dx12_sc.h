@@ -75,7 +75,15 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     // copies the back buffer (with ReShade's effects and overlay drawn) into the current shared copy.
     bool CaptureReShadeBackBuffer(ID3D11Resource* backBuffer);
 
+    // The FG output cannot present this back buffer format and it is converted to HDR10 instead
+    // (FP16 HDR with DLSS-G or XeFG, Config Dx11wDx12HDR10Conversion)
+    static bool NeedsHdr10Conversion(DXGI_FORMAT gameFormat);
+
   private:
+    bool _CopyToShared(ID3D11Resource* source);
+    bool _ConvertToHdr10(ID3D11Resource* source);
+    void _UpdateHdr10State();
+    void _ReleaseHdr10Resources(bool releaseShader);
     bool _InitInteropObjects();
     bool _RequestSharedBackBuffer(UINT index);
     bool _CopyDx11BackBufferToShared(UINT index);
@@ -154,6 +162,18 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     UINT _hiddenWindowVerifyFrame = 0;
     bool _hiddenWindowAttachLogged = false;
     bool _hiddenWindowVerifyLogged = false;
+
+    // HDR10 conversion: game back buffer FP16, FG swapchain R10G10B10A2 with the PQ/BT.2020 color space
+    bool _hdr10Active = false;
+    bool _hdr10ErrorLogged = false;
+    bool _fgColorSpaceOverridden = false;
+    DXGI_COLOR_SPACE_TYPE _gameColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    ID3D11Texture2D* _hdrSource = nullptr; // FP16 copy of the back buffer that can be read by a shader
+    ID3D11ShaderResourceView* _hdrSourceSrv = nullptr;
+    std::vector<ID3D11UnorderedAccessView*> _hdrSharedUavs;
+    ID3D11ComputeShader* _hdrShader = nullptr;
+    ID3D11Buffer* _hdrConstants = nullptr;
+    bool _hdrShaderFailed = false;
 
     HWND _handle = nullptr;
 };

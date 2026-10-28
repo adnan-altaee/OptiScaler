@@ -670,6 +670,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DontUseNTShared.set_from_config(readBool("Dx11withDx12", "DontUseNTShared"));
             Dx11wDx12CaptureAfterReShade.set_from_config(readBool("Dx11withDx12", "CaptureAfterReShade"));
             Dx11wDx12ParentHiddenWindow.set_from_config(readBool("Dx11withDx12", "ParentHiddenWindow"));
+            Dx11wDx12HDR10Conversion.set_from_config(readBool("Dx11withDx12", "HDR10Conversion"));
+            Dx11wDx12HDR10InputIsPQ.set_from_config(readBool("Dx11withDx12", "HDR10InputIsPQ"));
         }
 
         // NvApi
@@ -1852,6 +1854,10 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->Dx11wDx12CaptureAfterReShade.value_for_config()).c_str());
         ini.SetValue("Dx11withDx12", "ParentHiddenWindow",
                      GetBoolValue(Instance()->Dx11wDx12ParentHiddenWindow.value_for_config()).c_str());
+        ini.SetValue("Dx11withDx12", "HDR10Conversion",
+                     GetBoolValue(Instance()->Dx11wDx12HDR10Conversion.value_for_config()).c_str());
+        ini.SetValue("Dx11withDx12", "HDR10InputIsPQ",
+                     GetBoolValue(Instance()->Dx11wDx12HDR10InputIsPQ.value_for_config()).c_str());
     }
 
     // Logging

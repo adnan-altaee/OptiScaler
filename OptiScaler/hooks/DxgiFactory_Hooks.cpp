@@ -597,6 +597,13 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
                     if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc(fgDesc, tearingSupported))
                     {
+                        // DLSS-G/XeFG cannot present FP16: HDR10 buffers, frames converted by Dx11wDx12SC
+                        if (Dx11wDx12SC::NeedsHdr10Conversion(fgDesc.BufferDesc.Format))
+                        {
+                            LOG_INFO("Dx11wDx12 FG swapchain uses HDR10 (R10G10B10A2) for the game's FP16 back buffer");
+                            fgDesc.BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+                        }
+
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
                             fgScResult = FGHooks::CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
@@ -986,6 +993,13 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
                     if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc, tearingSupported))
                     {
+                        // DLSS-G/XeFG cannot present FP16: HDR10 buffers, frames converted by Dx11wDx12SC
+                        if (Dx11wDx12SC::NeedsHdr10Conversion(fgDesc.Format))
+                        {
+                            LOG_INFO("Dx11wDx12 FG swapchain uses HDR10 (R10G10B10A2) for the game's FP16 back buffer");
+                            fgDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+                        }
+
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
                             fgScResult = FGHooks::CreateSwapChainForHwnd(

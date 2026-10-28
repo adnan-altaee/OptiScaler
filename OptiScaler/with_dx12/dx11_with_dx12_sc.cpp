@@ -14,6 +14,7 @@
 #include <Config.h>
 #include <misc/IdentifyGpu.h>
 #include <misc/HiddenWindow.h>
+#include <shaders/Shader_Common.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -353,6 +354,7 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     State::Instance().swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
 
     _RefreshCachedSwapchainDesc();
+    _UpdateHdr10State();
 
     LOG_INFO("Dx11wDx12SC {} created, real: {:X}, fg: {:X}, dx11: {:X}, dx12: {:X}, queue: {:X}", _id, (UINT64) _real,
              (UINT64) _fgSwapChain, (UINT64) _dx11Device, (UINT64) _dx12Device, (UINT64) _dx12CommandQueue);
@@ -362,6 +364,7 @@ Dx11wDx12SC::~Dx11wDx12SC()
 {
     MenuOverlayDx::CleanupRenderTarget(true, _handle);
     _ReleaseInteropObjects();
+    _ReleaseHdr10Resources(true);
 
     SafeRelease(_real4);
     SafeRelease(_real3);
@@ -678,7 +681,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
 
-    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+    // DLSS-G/XeFG cannot present FP16: the FG swapchain gets HDR10 buffers and the frames are converted
+    const DXGI_FORMAT gameFormat = NewFormat != DXGI_FORMAT_UNKNOWN ? NewFormat : _bufferFormat;
+    const DXGI_FORMAT fgFormat = NeedsHdr10Conversion(gameFormat) ? DXGI_FORMAT_R10G10B10A2_UNORM : NewFormat;
+
+    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, fgFormat, SwapChainFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
 
@@ -722,7 +729,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, fgFormat, SwapChainFlags);
         }
     }
 
@@ -731,6 +738,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
         _RefreshCachedSwapchainDesc();
+        _UpdateHdr10State();
 
         if (Config::Instance()->IsFGEnabled())
         {
@@ -909,6 +917,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::CheckColorSpaceSupport(DXGI_COLOR_SPACE_T
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
+    _gameColorSpace = ColorSpace;
+
+    // The FG swapchain keeps the HDR10 color space of the converted frames
+    if (_hdr10Active)
+    {
+        LOG_INFO("Game color space {} kept for its back buffer, FG swapchain stays HDR10", (UINT) ColorSpace);
+        return S_OK;
+    }
+
     if (_fgSwapChain != nullptr)
         return _fgSwapChain->SetColorSpace1(ColorSpace);
 
@@ -925,7 +942,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     if (_real3 == nullptr)
         return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
 
-    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, Format, SwapChainFlags);
+    const DXGI_FORMAT gameFormat = Format != DXGI_FORMAT_UNKNOWN ? Format : _bufferFormat;
+    const DXGI_FORMAT fgFormat = NeedsHdr10Conversion(gameFormat) ? DXGI_FORMAT_R10G10B10A2_UNORM : Format;
+
+    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, fgFormat, SwapChainFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
 
@@ -970,7 +990,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, fgFormat, SwapChainFlags);
         }
     }
 
@@ -979,6 +999,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
         _RefreshCachedSwapchainDesc();
+        _UpdateHdr10State();
 
         if (Config::Instance()->IsFGEnabled())
         {
@@ -1204,6 +1225,15 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
         desc.CPUAccessFlags = 0;
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
 
+        // HDR10 conversion writes the converted frame into the shared copy with a compute shader
+        if (_hdr10Active)
+        {
+            desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+        }
+
         result = _dx11Device->CreateTexture2D(&desc, nullptr, &_sharedDx11BackBufferCopies[_currentFakeIndex]);
         if (FAILED(result) || _sharedDx11BackBufferCopies[_currentFakeIndex] == nullptr)
         {
@@ -1384,7 +1414,9 @@ bool Dx11wDx12SC::CaptureReShadeBackBuffer(ID3D11Resource* backBuffer)
         return false;
     }
 
-    _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], backBuffer);
+    if (!_CopyToShared(backBuffer))
+        return false;
+
     _capturedFromReShade = true;
     return true;
 }
@@ -1411,9 +1443,9 @@ bool Dx11wDx12SC::_CopyDx11BackBufferToShared(UINT index)
     LOG_DEBUG("Copying DX11 backbuffer {} sourceTexture: {:X} to shadow copy {:X}", index, (size_t) sourceTexture,
               (size_t) _sharedDx11BackBufferCopies[_currentFakeIndex]);
 
-    _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], sourceTexture);
+    const bool copied = _CopyToShared(sourceTexture);
     sourceTexture->Release();
-    return true;
+    return copied;
 }
 
 bool Dx11wDx12SC::_WaitDx11ThenDx12()
@@ -1640,6 +1672,8 @@ void Dx11wDx12SC::_ReleaseInteropBackBuffers()
 {
     _interopInitialized = false;
 
+    _ReleaseHdr10Resources(false);
+
     for (auto& resource : _openedDx11BackBuffers)
         SafeRelease(resource);
 
@@ -1701,3 +1735,397 @@ UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const
 }
 
 void Dx11wDx12SC::_AdvanceFakeBackBufferIndex() { _currentFakeIndex = (_currentFakeIndex + 1) % _bufferCount; }
+
+// ---------------------------------------------------------------------------------------------------------------
+// HDR10 conversion
+//
+// DLSS-G "does NOT support FP16 pixel format and scRGB color space" (Streamline DLSS-G programming guide, 11.0) and
+// XeFG has the same limit. A DX11 game that renders HDR into an FP16 back buffer (Assassin's Creed Origins: scRGB,
+// switched on through NVAPI in exclusive fullscreen) would leave frame generation without a usable frame. With
+// Dx11wDx12HDR10Conversion the FG swapchain gets R10G10B10A2 buffers with the PQ/BT.2020 color space, and every
+// frame is converted on the D3D11 side while it is copied into the shared texture. The display only shows HDR10
+// from a windowed (borderless) flip-model swapchain when Windows HDR is turned on.
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace
+{
+const char* kHdr10ConvertShader = R"(
+Texture2D<float4> Source : register(t0);
+RWTexture2D<unorm float4> Destination : register(u0);
+
+cbuffer Params : register(b0)
+{
+    uint Width;
+    uint Height;
+    uint InputIsPQ;
+    float ScRgbNits;
+};
+
+float3 EncodePQ(float3 nits)
+{
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+
+    float3 y = saturate(nits / 10000.0);
+    float3 ym = pow(y, m1);
+    return pow((c1 + c2 * ym) / (1.0 + c3 * ym), m2);
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= Width || id.y >= Height)
+        return;
+
+    float3 color = Source.Load(int3(id.xy, 0)).rgb;
+    float3 pq;
+
+    if (InputIsPQ != 0)
+    {
+        pq = saturate(color);
+    }
+    else
+    {
+        // scRGB: linear BT.709 primaries, 1.0 = 80 nits, may be negative outside the BT.709 gamut
+        float3 bt2020 = float3(dot(float3(0.6274040, 0.3292820, 0.0433136), color),
+                               dot(float3(0.0690970, 0.9195400, 0.0113612), color),
+                               dot(float3(0.0163916, 0.0880132, 0.8955950), color));
+
+        // Also turns NaN into 0
+        bt2020 = max(bt2020, 0.0);
+        pq = EncodePQ(bt2020 * ScRgbNits);
+    }
+
+    Destination[id.xy] = float4(pq, 1.0);
+}
+)";
+
+struct Hdr10ConvertConstants
+{
+    UINT Width;
+    UINT Height;
+    UINT InputIsPQ;
+    float ScRgbNits;
+};
+
+bool IsWindowsHdrOn(IDXGISwapChain* swapChain)
+{
+    if (swapChain == nullptr)
+        return false;
+
+    IDXGIOutput* output = nullptr;
+    if (FAILED(swapChain->GetContainingOutput(&output)) || output == nullptr)
+        return false;
+
+    bool hdrOn = false;
+    IDXGIOutput6* output6 = nullptr;
+    if (SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(&output6))) && output6 != nullptr)
+    {
+        DXGI_OUTPUT_DESC1 desc = {};
+        if (SUCCEEDED(output6->GetDesc1(&desc)))
+            hdrOn = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+
+        output6->Release();
+    }
+
+    output->Release();
+    return hdrOn;
+}
+
+void SetOutputColorSpaceState(DXGI_COLOR_SPACE_TYPE colorSpace)
+{
+    OutputColorSpace info {};
+    info.dxgiColorSpace = colorSpace;
+    info.range = ColorRange::Full;
+    info.model = ColorModel::RGB;
+    info.valid = true;
+
+    switch (colorSpace)
+    {
+    case DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020:
+        info.transfer = ColorTransfer::PQ;
+        info.primaries = ColorPrimaries::Rec2020;
+        break;
+
+    case DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709:
+        info.transfer = ColorTransfer::Linear;
+        info.primaries = ColorPrimaries::Rec709;
+        break;
+
+    default:
+        info.transfer = ColorTransfer::SRGB;
+        info.primaries = ColorPrimaries::Rec709;
+        break;
+    }
+
+    State::Instance().outputColorSpace = info;
+}
+} // namespace
+
+bool Dx11wDx12SC::NeedsHdr10Conversion(DXGI_FORMAT gameFormat)
+{
+    if (gameFormat != DXGI_FORMAT_R16G16B16A16_FLOAT || !Config::Instance()->Dx11wDx12HDR10Conversion.value_or_default())
+        return false;
+
+    const auto fgOutput = State::Instance().activeFgOutput;
+    return fgOutput == FGOutput::DLSSG || fgOutput == FGOutput::XeFG;
+}
+
+void Dx11wDx12SC::_UpdateHdr10State()
+{
+    if (_fgSwapChain == nullptr)
+        return;
+
+    DXGI_SWAP_CHAIN_DESC fgDesc = {};
+    if (FAILED(_fgSwapChain->GetDesc(&fgDesc)))
+        return;
+
+    const bool active =
+        _bufferFormat == DXGI_FORMAT_R16G16B16A16_FLOAT && fgDesc.BufferDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
+
+    if (active)
+    {
+        const bool windowsHdr = IsWindowsHdrOn(_fgSwapChain);
+
+        UINT support = 0;
+        const auto supportResult = _fgSwapChain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support);
+        const auto colorSpaceResult = _fgSwapChain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+
+        _fgColorSpaceOverridden = true;
+        SetOutputColorSpaceState(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        State::Instance().hdrOutputActive = windowsHdr;
+
+        if (!_hdr10Active)
+        {
+            LOG_INFO("HDR10 output on: the FP16 back buffer ({}) is converted to R10G10B10A2 PQ/BT.2020 for frame "
+                     "generation; {}x{}, color space support {:X} ({:X}), SetColorSpace1 {:X}",
+                     Config::Instance()->Dx11wDx12HDR10InputIsPQ.value_or_default() ? "PQ" : "scRGB",
+                     fgDesc.BufferDesc.Width, fgDesc.BufferDesc.Height, support, (UINT) supportResult,
+                     (UINT) colorSpaceResult);
+        }
+
+        if (!windowsHdr)
+            LOG_WARN("Windows HDR is off for this display: an HDR10 frame generation swapchain needs it on (Win+Alt+B), "
+                     "or the picture will look washed out");
+    }
+    else if (_fgColorSpaceOverridden)
+    {
+        const auto colorSpaceResult = _fgSwapChain->SetColorSpace1(_gameColorSpace);
+        _fgColorSpaceOverridden = false;
+        SetOutputColorSpaceState(_gameColorSpace);
+        State::Instance().hdrOutputActive = false;
+
+        LOG_INFO("HDR10 output off: FG swapchain format {}, color space {} restored ({:X})",
+                 (UINT) fgDesc.BufferDesc.Format, (UINT) _gameColorSpace, (UINT) colorSpaceResult);
+    }
+
+    _hdr10Active = active;
+}
+
+void Dx11wDx12SC::_ReleaseHdr10Resources(bool releaseShader)
+{
+    for (auto& uav : _hdrSharedUavs)
+        SafeRelease(uav);
+
+    _hdrSharedUavs.clear();
+
+    SafeRelease(_hdrSourceSrv);
+    SafeRelease(_hdrSource);
+
+    if (releaseShader)
+    {
+        SafeRelease(_hdrShader);
+        SafeRelease(_hdrConstants);
+    }
+}
+
+bool Dx11wDx12SC::_CopyToShared(ID3D11Resource* source)
+{
+    if (source == nullptr || _dx11Context == nullptr || _currentFakeIndex >= _sharedDx11BackBufferCopies.size() ||
+        _sharedDx11BackBufferCopies[_currentFakeIndex] == nullptr)
+    {
+        return false;
+    }
+
+    if (!_hdr10Active)
+    {
+        _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], source);
+        return true;
+    }
+
+    if (!_ConvertToHdr10(source) && !_hdr10ErrorLogged)
+    {
+        _hdr10ErrorLogged = true;
+        LOG_ERROR("HDR10 conversion failed, frame generation gets no new frames");
+    }
+
+    // A format mismatch cannot be copied; never report a device loss for it
+    return true;
+}
+
+bool Dx11wDx12SC::_ConvertToHdr10(ID3D11Resource* source)
+{
+    if (_dx11Device == nullptr || _hdrShaderFailed)
+        return false;
+
+    if (_hdrShader == nullptr)
+    {
+        auto blob = CompileShader(kHdr10ConvertShader, "CSMain", "cs_5_0");
+        if (blob == nullptr)
+        {
+            _hdrShaderFailed = true;
+            return false;
+        }
+
+        auto result = _dx11Device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
+                                                       &_hdrShader);
+        blob->Release();
+
+        if (FAILED(result))
+        {
+            LOG_ERROR("HDR10 CreateComputeShader failed: {:X}", (UINT) result);
+            _hdrShaderFailed = true;
+            return false;
+        }
+    }
+
+    if (_hdrConstants == nullptr)
+    {
+        D3D11_BUFFER_DESC cbDesc = {};
+        cbDesc.ByteWidth = sizeof(Hdr10ConvertConstants);
+        cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+        cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+        auto result = _dx11Device->CreateBuffer(&cbDesc, nullptr, &_hdrConstants);
+        if (FAILED(result))
+        {
+            LOG_ERROR("HDR10 constant buffer failed: {:X}", (UINT) result);
+            return false;
+        }
+    }
+
+    ID3D11Texture2D* sourceTexture = nullptr;
+    if (FAILED(source->QueryInterface(IID_PPV_ARGS(&sourceTexture))) || sourceTexture == nullptr)
+        return false;
+
+    D3D11_TEXTURE2D_DESC sourceDesc = {};
+    sourceTexture->GetDesc(&sourceDesc);
+    sourceTexture->Release();
+
+    // Swapchain buffers usually cannot be read by shaders, so take a readable FP16 copy first
+    if (_hdrSource != nullptr)
+    {
+        D3D11_TEXTURE2D_DESC currentDesc = {};
+        _hdrSource->GetDesc(&currentDesc);
+
+        if (currentDesc.Width != sourceDesc.Width || currentDesc.Height != sourceDesc.Height ||
+            currentDesc.Format != sourceDesc.Format)
+        {
+            SafeRelease(_hdrSourceSrv);
+            SafeRelease(_hdrSource);
+        }
+    }
+
+    if (_hdrSource == nullptr)
+    {
+        D3D11_TEXTURE2D_DESC desc = sourceDesc;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.CPUAccessFlags = 0;
+        desc.MiscFlags = 0;
+
+        auto result = _dx11Device->CreateTexture2D(&desc, nullptr, &_hdrSource);
+        if (FAILED(result))
+        {
+            LOG_ERROR("HDR10 source copy texture failed: {:X}", (UINT) result);
+            return false;
+        }
+
+        result = _dx11Device->CreateShaderResourceView(_hdrSource, nullptr, &_hdrSourceSrv);
+        if (FAILED(result))
+        {
+            LOG_ERROR("HDR10 source SRV failed: {:X}", (UINT) result);
+            SafeRelease(_hdrSource);
+            return false;
+        }
+    }
+
+    if (_hdrSharedUavs.size() < _sharedDx11BackBufferCopies.size())
+        _hdrSharedUavs.resize(_sharedDx11BackBufferCopies.size(), nullptr);
+
+    auto& uav = _hdrSharedUavs[_currentFakeIndex];
+    if (uav == nullptr)
+    {
+        auto result =
+            _dx11Device->CreateUnorderedAccessView(_sharedDx11BackBufferCopies[_currentFakeIndex], nullptr, &uav);
+        if (FAILED(result))
+        {
+            LOG_ERROR("HDR10 shared copy UAV failed: {:X}", (UINT) result);
+            return false;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC targetDesc = {};
+    _sharedDx11BackBufferCopies[_currentFakeIndex]->GetDesc(&targetDesc);
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    auto result = _dx11Context->Map(_hdrConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (FAILED(result))
+    {
+        LOG_ERROR("HDR10 constant buffer Map failed: {:X}", (UINT) result);
+        return false;
+    }
+
+    Hdr10ConvertConstants constants {};
+    constants.Width = std::min(targetDesc.Width, sourceDesc.Width);
+    constants.Height = std::min(targetDesc.Height, sourceDesc.Height);
+    constants.InputIsPQ = Config::Instance()->Dx11wDx12HDR10InputIsPQ.value_or_default() ? 1 : 0;
+    constants.ScRgbNits = 80.0f;
+    memcpy(mapped.pData, &constants, sizeof(constants));
+    _dx11Context->Unmap(_hdrConstants, 0);
+
+    _dx11Context->CopyResource(_hdrSource, source);
+
+    // The compute stage belongs to the game (and ReShade) between frames: save and restore what is touched
+    ID3D11ComputeShader* oldShader = nullptr;
+    ID3D11ShaderResourceView* oldSrv = nullptr;
+    ID3D11UnorderedAccessView* oldUav = nullptr;
+    ID3D11Buffer* oldConstants = nullptr;
+
+    _dx11Context->CSGetShader(&oldShader, nullptr, nullptr);
+    _dx11Context->CSGetShaderResources(0, 1, &oldSrv);
+    _dx11Context->CSGetUnorderedAccessViews(0, 1, &oldUav);
+    _dx11Context->CSGetConstantBuffers(0, 1, &oldConstants);
+
+    _dx11Context->CSSetShader(_hdrShader, nullptr, 0);
+    _dx11Context->CSSetConstantBuffers(0, 1, &_hdrConstants);
+    _dx11Context->CSSetShaderResources(0, 1, &_hdrSourceSrv);
+    _dx11Context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+
+    _dx11Context->Dispatch((constants.Width + 7) / 8, (constants.Height + 7) / 8, 1);
+
+    ID3D11UnorderedAccessView* nullUav = nullptr;
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    _dx11Context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    _dx11Context->CSSetShaderResources(0, 1, &nullSrv);
+
+    _dx11Context->CSSetShader(oldShader, nullptr, 0);
+    _dx11Context->CSSetShaderResources(0, 1, &oldSrv);
+    _dx11Context->CSSetUnorderedAccessViews(0, 1, &oldUav, nullptr);
+    _dx11Context->CSSetConstantBuffers(0, 1, &oldConstants);
+
+    SafeRelease(oldShader);
+    SafeRelease(oldSrv);
+    SafeRelease(oldUav);
+    SafeRelease(oldConstants);
+
+    return true;
+}

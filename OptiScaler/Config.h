@@ -566,6 +566,10 @@ class Config
     // With ReShade capture active, make the hidden DX11 swapchain window a hidden child of the game window, so
     // ReShade routes the game window's mouse messages to its overlay (it only knows the hidden window)
     CustomOptional<bool> Dx11wDx12ParentHiddenWindow { true };
+    // DLSS-G and XeFG only take HDR10 back buffers: convert the game's FP16 back buffer (scRGB, or PQ with
+    // Dx11wDx12HDR10InputIsPQ) to R10G10B10A2 PQ/BT.2020 and present the FG swapchain in HDR10
+    CustomOptional<bool> Dx11wDx12HDR10Conversion { true };
+    CustomOptional<bool> Dx11wDx12HDR10InputIsPQ { false };
 
     // vulkanwdx12
     CustomOptional<bool> VulkanUseCopyForInputs { false };
