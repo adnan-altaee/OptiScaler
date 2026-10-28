@@ -3616,7 +3616,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
     if (state.api == DX11 && DrawMergeDx11::IsInstalled())
     {
         ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader("Draw Call Merging"); ch.IsHeaderOpen())
+        if (auto ch = ScopedCollapsingHeader("Draw Call Merging", ImGuiTreeNodeFlags_DefaultOpen); ch.IsHeaderOpen())
         {
             ScopedIndent indent {};
             ImGui::Spacing();
