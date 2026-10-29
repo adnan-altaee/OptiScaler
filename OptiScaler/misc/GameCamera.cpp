@@ -364,7 +364,7 @@ struct DepthProbe
     bool pending[3] {};
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     uint64_t calls = 0;
-    int votes[5] {}; // 1 inverted, 0 standard, -1 inconclusive
+    int votes[5] {}; // 1 inverted, 0 standard, 2 linear (values above 1), -1 inconclusive
     int voteCount = 0;
     int decided = -1;
     bool unsupportedLogged = false;
@@ -395,22 +395,31 @@ void AddDepthVote(int vote)
     const int count = std::min(probe.voteCount, 5);
     int inverted = 0;
     int standard = 0;
+    int linear = 0;
     for (int i = 0; i < count; ++i)
     {
         inverted += probe.votes[i] == 1;
         standard += probe.votes[i] == 0;
+        linear += probe.votes[i] == 2;
     }
 
     int decided = probe.decided;
-    if (inverted >= 3 && standard == 0)
+    if (inverted >= 3 && standard == 0 && linear == 0)
         decided = 1;
-    else if (standard >= 3 && inverted == 0)
+    else if (standard >= 3 && inverted == 0 && linear == 0)
         decided = 0;
+    else if (linear >= 3 && inverted == 0 && standard == 0)
+        decided = 2;
 
     if (decided != probe.decided)
     {
-        LOG_INFO("Game camera: the upscaler's depth texture is {} (near = {}), told to frame generation as such",
-                 decided == 1 ? "inverted" : "standard", decided == 1 ? 1 : 0);
+        if (decided == 2)
+            LOG_INFO("Game camera: the upscaler's depth texture holds linear view depth, frame generation gets it "
+                     "converted to inverted hardware depth");
+        else
+            LOG_INFO("Game camera: the upscaler's depth texture is {} (near = {}), told to frame generation as such",
+                     decided == 1 ? "inverted" : "standard", decided == 1 ? 1 : 0);
+
         probe.decided = decided;
     }
 }
@@ -738,11 +747,18 @@ void GameCamera::ProbeDepth(ID3D11DeviceContext* context, ID3D11Resource* depth,
         const float* values = static_cast<const float*>(mapped.pData);
         int low = 0;
         int high = 0;
+        int beyond = 0; // above 1: not hardware depth, linear view depth in world units
         for (int i = 0; i < 16; ++i)
         {
             const float v = values[i];
-            if (!std::isfinite(v) || v < -0.01f || v > 1.01f)
+            if (!std::isfinite(v) || v < -0.01f)
                 continue;
+
+            if (v > 1.01f)
+            {
+                beyond++;
+                continue;
+            }
 
             low += v < 0.5f;
             high += v >= 0.5f;
@@ -751,7 +767,7 @@ void GameCamera::ProbeDepth(ID3D11DeviceContext* context, ID3D11Resource* depth,
         context->Unmap(probe.staging[slot], 0);
         probe.pending[slot] = false;
 
-        AddDepthVote(low >= 10 ? 1 : (high >= 10 ? 0 : -1));
+        AddDepthVote(beyond >= 10 ? 2 : (low >= 10 ? 1 : (high >= 10 ? 0 : -1)));
     }
 
     if (probe.calls % 30 != 1)
@@ -828,3 +844,5 @@ void GameCamera::ProbeDepth(ID3D11DeviceContext* context, ID3D11Resource* depth,
 }
 
 int GameCamera::DepthInverted() { return probe.decided; }
+
+bool GameCamera::DepthIsLinear() { return probe.decided == 2; }

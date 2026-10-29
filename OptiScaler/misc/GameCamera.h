@@ -56,6 +56,10 @@ bool GetFrame(float jitterX, float jitterY, uint32_t renderWidth, uint32_t rende
 // Depth convention of the depth texture handed to the upscaler, from a few sampled texels (never waits on the GPU)
 void ProbeDepth(ID3D11DeviceContext* context, ID3D11Resource* depth, uint32_t renderWidth, uint32_t renderHeight);
 
-// -1 not known yet, 0 standard (near = 0), 1 inverted (near = 1)
+// -1 not known yet, 0 standard (near = 0), 1 inverted (near = 1), 2 linear view depth in world units (see below)
 int DepthInverted();
+
+// The depth texture holds linear view depth (metres), not hardware depth: Assassin's Creed Origins' DLSS mod hands
+// that to the upscaler. Frame generation needs hardware depth, so it gets a converted copy (shaders/depth_linear).
+bool DepthIsLinear();
 } // namespace GameCamera

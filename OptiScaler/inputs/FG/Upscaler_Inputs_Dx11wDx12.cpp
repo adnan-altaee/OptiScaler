@@ -9,11 +9,13 @@
 #include <hudfix/Hudfix_Dx11.h>
 #include <resource_tracking/ResTrack_dx11.h>
 #include "shaders/depth_scale/DS_Dx12.h"
+#include "shaders/depth_linear/DL_Dx12.h"
 #include <misc/GameCamera.h>
 #include <misc/FGCapture.h>
 
 using namespace OptiMath;
 static DS_Dx12* DepthScaleDx11wDx12 = nullptr;
+static DL_Dx12* DepthLinearDx11wDx12 = nullptr; // linear view depth -> hardware depth for frame generation
 
 // Used when the upscaler is native DX11 and doesn't have its own D3D12 shared resources
 static Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C FgResourceCache = {};
@@ -144,7 +146,12 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
             fgConstants.flags |= FG_Flags::InvertedDepth;
         else if (inverted == 0)
             fgConstants.flags.reset(FG_Flags::InvertedDepth);
+        else if (GameCamera::DepthIsLinear())
+            fgConstants.flags |= FG_Flags::InvertedDepth; // converted to inverted hardware depth below
     }
+
+    const bool linearDepth =
+        Config::Instance()->Dx11wDx12DetectDepthInverted.value_or(gameCamera) && GameCamera::DepthIsLinear();
 
     fg->EvaluateState(_dx12Device, fgConstants);
 
@@ -154,6 +161,12 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     {
         delete DepthScaleDx11wDx12;
         DepthScaleDx11wDx12 = nullptr;
+    }
+
+    if (DepthLinearDx11wDx12 != nullptr && (!Config::Instance()->IsFGEnabled() || !linearDepth))
+    {
+        delete DepthLinearDx11wDx12;
+        DepthLinearDx11wDx12 = nullptr;
     }
 
     int reset = 0;
@@ -168,6 +181,10 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
 
     auto aspectRatio = (float) feature->DisplayWidth() / (float) feature->DisplayHeight();
     fg->SetCameraValues(camera.cameraNear, camera.cameraFar, camera.cameraVFov, aspectRatio, camera.meterFactor);
+
+    // The planes frame generation is told about; converted linear depth is made for the same projection
+    float fgNearPlane = std::min(camera.cameraNear, camera.cameraFar);
+    float fgFarPlane = std::max(camera.cameraNear, camera.cameraFar);
 
     // The game's real camera instead of the placeholder values above, when it can be read (misc/GameCamera.cpp)
     GameCameraFrame gameFrame {};
@@ -186,6 +203,8 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
                 std::swap(nearValue, farValue);
 
             fg->SetCameraValues(nearValue, farValue, gameFrame.verticalFov, gameFrame.aspect, camera.meterFactor);
+            fgNearPlane = gameFrame.nearPlane;
+            fgFarPlane = gameFrame.farPlane;
             fg->SetCameraData(gameFrame.position, gameFrame.up, gameFrame.right, gameFrame.forward);
             fg->SetCameraMatrices(gameFrame.viewToClip, gameFrame.clipToView, gameFrame.clipToPrevClip,
                                   gameFrame.prevClipToClip);
@@ -287,7 +306,38 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     {
         auto done = false;
 
-        if (Config::Instance()->FGEnableDepthScale.value_or_default())
+        // Linear view depth: frame generation gets inverted hardware depth for the planes it was given
+        if (linearDepth)
+        {
+            if (DepthLinearDx11wDx12 == nullptr)
+                DepthLinearDx11wDx12 = new DL_Dx12("Depth Linear Dx11wDx12", _dx12Device);
+
+            if (DepthLinearDx11wDx12->IsInit() &&
+                DepthLinearDx11wDx12->CreateBufferResource(_dx12Device, paramDepth,
+                                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS) &&
+                DepthLinearDx11wDx12->Buffer() != nullptr)
+            {
+                DepthLinearDx11wDx12->SetBufferState(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                if (DepthLinearDx11wDx12->Dispatch(cmdList, paramDepth, DepthLinearDx11wDx12->Buffer(), fgNearPlane,
+                                                   fgFarPlane))
+                {
+                    Dx12Resource setResource {};
+                    setResource.type = FG_ResourceType::Depth;
+                    setResource.cmdList = cmdList;
+                    setResource.resource = DepthLinearDx11wDx12->Buffer();
+                    setResource.width = feature->RenderWidth();
+                    setResource.height = feature->RenderHeight();
+                    setResource.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                    setResource.validity = FG_ResourceValidity::UntilPresent;
+
+                    fg->SetResource(&setResource);
+                    done = true;
+                }
+            }
+        }
+
+        if (!done && Config::Instance()->FGEnableDepthScale.value_or_default())
         {
             if (DepthScaleDx11wDx12 == nullptr)
                 DepthScaleDx11wDx12 = new DS_Dx12("Depth Scale Dx11wDx12", _dx12Device);
