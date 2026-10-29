@@ -33,9 +33,10 @@ INSTALLING
          OptiScaler.ini
          OptiScaler\  (folder)
 
-  3. Run OptiScaler\Streamlined_fetcher_windows.bat and press 1. It downloads NVIDIA Streamline, including
-     DLSS Frame Generation (nvngx_dlssg.dll), from NVIDIA's GitHub into OptiScaler\streamline. Those files
-     are NVIDIA's and can't be included here.
+  3. Run OptiScaler\Streamlined_fetcher_windows.bat and press 1. It downloads the latest NVIDIA Streamline
+     release, including DLSS Frame Generation (nvngx_dlssg.dll), from NVIDIA's official GitHub page into
+     OptiScaler\streamline. (Already have OptiScaler's streamline folder from another install? Copy it
+     instead.)
   4. Start the game. Frame generation is on as soon as DLSS is running.
 
 Optional mods that work alongside: RenoDX, Origins GFX, and the MFG Unlocker plugin for 3x/4x on RTX 40
@@ -87,3 +88,6 @@ CREDITS AND LICENCES
   * ReShade add-on API headers by crosire - BSD-3-Clause.
   * DirectX 12 Agility SDK runtime (OptiScaler\D3D12_OptiScaler) by Microsoft - see Licenses.
   * NVIDIA DLSS Frame Generation and Streamline are NVIDIA's and are downloaded from NVIDIA directly.
+
+This build never connects to the internet (OptiScaler's update check is off: official OptiScaler updates do
+not have the changes for this game, so do not replace winmm.dll with one).

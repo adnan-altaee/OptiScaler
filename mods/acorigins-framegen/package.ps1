@@ -53,6 +53,7 @@ $preset = [ordered]@{
     'XeFG'         = [ordered]@{ 'ForceBorderless' = 'true' }
     'DLSSG'        = [ordered]@{ 'UseGamesReflexMarkers' = 'false' }
     'Plugins'      = [ordered]@{ 'LoadAsiPlugins' = 'true' }
+    'Hotfix'       = [ordered]@{ 'CheckForUpdate' = 'false' }
 }
 
 $lines = Get-Content -Path (Join-Path $BuildDir 'OptiScaler.ini') -Encoding UTF8
@@ -77,7 +78,8 @@ foreach ($s in $preset.Keys) {
 $header = @(
     "; Frame Generation for Assassin's Creed Origins $Version - OptiScaler settings.",
     "; Changed from OptiScaler's defaults: Dx11Upscaler, FrameGen Enabled/FGInput/FGOutput/FGNvngxReplacement,",
-    "; XeFG ForceBorderless, DLSSG UseGamesReflexMarkers and Plugins LoadAsiPlugins. Everything else is 'auto'.",
+    "; XeFG ForceBorderless, DLSSG UseGamesReflexMarkers, Plugins LoadAsiPlugins and Hotfix CheckForUpdate (off: no",
+    "; internet access, and official OptiScaler updates would remove the Origins changes). Everything else is 'auto'.",
     ''
 )
 [System.IO.File]::WriteAllLines((Join-Path $Pkg 'OptiScaler.ini'), [string[]]($header + $lines), (New-Object System.Text.UTF8Encoding($false)))

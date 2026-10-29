@@ -477,7 +477,9 @@ class Config
     };
 
     // Hotfixes
-    CustomOptional<bool> CheckForUpdate { true };
+    // Off in this fork: it would point users at upstream releases, which lack the Assassin's Creed Origins changes,
+    // and mod sites restrict add-ons that connect to the internet
+    CustomOptional<bool> CheckForUpdate { false };
     CustomOptional<bool, SoftDefault> DisableOverlays { false };
 
     CustomOptional<bool> SimulateWaitableObject { false };
