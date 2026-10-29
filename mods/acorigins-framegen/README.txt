@@ -7,7 +7,8 @@ changes for this game:
   * ReShade's effects and its menu stay visible and usable with frame generation on.
   * HDR works: the game's HDR picture is converted to HDR10, which DLSS Frame Generation needs.
   * Frame generation gets the game's real camera (field of view, movement, camera cuts) instead of guesses,
-    which means fewer artefacts on fast turns and scene changes.
+    and the scene's depth in the form it needs (the DLSS mod passes distances in metres). That keeps the
+    area around Bayek clean when the camera turns fast, also at 3x.
 
 Frame generation takes its input from DLSS upscaling, so the DLSS mod below is required.
 
@@ -55,6 +56,8 @@ USING IT
   * Frame generation adds a little input latency and works best from about 50-60 fps before frame
     generation. The game's HUD has no separate layer for frame generation, so moving HUD elements can
     show slight ghosting.
+  * To judge the generated frames, tick "Show only generated frames" in the OptiScaler menu's DLSSG
+    settings for a moment (motion looks wrong while it is on).
 
 
 UNINSTALLING

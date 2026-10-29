@@ -40,7 +40,6 @@
 #include <memory>
 #include <type_traits>
 #include <misc/IdentifyGpu.h>
-#include <misc/FGCapture.h>
 #include <hooks/Amdxc64_Hooks.h>
 #include <low_latency/input/input_common.h>
 #include <hooks/Vulkan_Hooks.h>
@@ -5508,20 +5507,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ImGui::Checkbox("Show only generated frames##dlssg", &state.fgOnlyGenerated);
         ShowTooltip("Every real frame is replaced by a generated one, so artifacts in the generated frames are easy "
                     "to see.\nFor checking quality only: motion looks wrong while it is on.");
-
-        // DX11 games: save frame generation's inputs for a few frames (misc/FGCapture.cpp)
-        if (state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 && state.activeFgInput == FGInput::Upscaler)
-        {
-            ImGui::BeginDisabled(FGCapture::Busy());
-            if (ImGui::Button("Capture FG inputs##dlssg"))
-                FGCapture::Request(3, 5.0f);
-            ImGui::EndDisabled();
-            ShowTooltip("Saves motion vectors, depth and final color of 3 frames in a row to "
-                        "OptiScaler\\fg-capture,\nstarting 5 seconds after the click (close the menu and move). "
-                        "The game stalls briefly while they are written.");
-            ImGui::SameLine(0.0f, 16.0f);
-            ImGui::TextUnformatted(FGCapture::Status().c_str());
-        }
 
         bool useGamesMarkers = config->FGDLSSGUseGamesReflexMarkers.value_or_default();
         // Vulkan games' markers don't reach OptiScaler's Streamline

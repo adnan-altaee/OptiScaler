@@ -16,7 +16,6 @@
 #include <misc/HiddenWindow.h>
 #include <shaders/Shader_Common.h>
 #include <misc/GameCamera.h>
-#include <misc/FGCapture.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -1902,9 +1901,6 @@ bool Dx11wDx12SC::_CopyToShared(ID3D11Resource* source)
     {
         return false;
     }
-
-    // Menu "Capture FG inputs": the final color of the frame (misc/FGCapture.cpp)
-    FGCapture::OnColor(_dx11Context, source);
 
     if (!_hdr10Active)
     {

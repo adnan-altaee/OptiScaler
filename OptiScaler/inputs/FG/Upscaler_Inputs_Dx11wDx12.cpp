@@ -11,7 +11,6 @@
 #include "shaders/depth_scale/DS_Dx12.h"
 #include "shaders/depth_linear/DL_Dx12.h"
 #include <misc/GameCamera.h>
-#include <misc/FGCapture.h>
 
 using namespace OptiMath;
 static DS_Dx12* DepthScaleDx11wDx12 = nullptr;
@@ -187,13 +186,10 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     float fgFarPlane = std::max(camera.cameraNear, camera.cameraFar);
 
     // The game's real camera instead of the placeholder values above, when it can be read (misc/GameCamera.cpp)
-    GameCameraFrame gameFrame {};
-    bool haveGameFrame = false;
     if (gameCamera)
     {
-        haveGameFrame =
-            GameCamera::GetFrame(jitterX, jitterY, feature->RenderWidth(), feature->RenderHeight(), gameFrame);
-        if (haveGameFrame)
+        GameCameraFrame gameFrame {};
+        if (GameCamera::GetFrame(jitterX, jitterY, feature->RenderWidth(), feature->RenderHeight(), gameFrame))
         {
             float nearValue = gameFrame.nearPlane;
             float farValue = gameFrame.farPlane;
@@ -224,35 +220,6 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     fg->SetJitter(jitterX, jitterY);
     fg->SetReset(reset);
     fg->SetInterpolationRect(feature->DisplayWidth(), feature->DisplayHeight());
-
-    // Menu "Capture FG inputs": this frame's motion vectors, depth and constants (misc/FGCapture.cpp)
-    if (FGCapture::Busy())
-    {
-        ID3D11Resource* mv = nullptr;
-        if (InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &mv) != NVSDK_NGX_Result_Success)
-            InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, (void**) &mv);
-
-        ID3D11Resource* depth = nullptr;
-        if (InParameters->Get(NVSDK_NGX_Parameter_Depth, &depth) != NVSDK_NGX_Result_Success)
-            InParameters->Get(NVSDK_NGX_Parameter_Depth, (void**) &depth);
-
-        FGCapture::InputInfo info {};
-        info.renderWidth = feature->RenderWidth();
-        info.renderHeight = feature->RenderHeight();
-        info.displayWidth = feature->DisplayWidth();
-        info.displayHeight = feature->DisplayHeight();
-        info.mvScaleX = mvScaleX;
-        info.mvScaleY = mvScaleY;
-        info.jitterX = jitterX;
-        info.jitterY = jitterY;
-        info.lowResMV = feature->LowResMV();
-        info.jitteredMV = feature->JitteredMV();
-        info.depthInverted = fgConstants.flags[FG_Flags::InvertedDepth];
-        info.reset = reset != 0;
-        info.camera = haveGameFrame ? &gameFrame : nullptr;
-
-        FGCapture::OnInputs(Dx11WithDx12::GetD3D11DeviceContext(), mv, depth, info);
-    }
 
     Hudfix_Dx11::UpscaleStart();
 
