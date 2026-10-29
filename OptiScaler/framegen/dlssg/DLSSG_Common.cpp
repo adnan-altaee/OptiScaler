@@ -102,6 +102,10 @@ void DLSSG_Common::SetOptions(bool gameMarkersReachStreamline)
     options.numFramesToGenerate = _framesToInterpolate;
     options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
 
+    // Menu "Show only generated frames": every real frame is replaced by a generated one (to judge their quality)
+    if (State::Instance().fgOnlyGenerated)
+        options.flags |= sl::DLSSGFlags::eShowOnlyInterpolatedFrame;
+
     if (config->FGDLSSGForceDMFG.value_or_default())
     {
         options.mode = sl::DLSSGMode::eDynamic;
