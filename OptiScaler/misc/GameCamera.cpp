@@ -709,9 +709,9 @@ bool GameCamera::GetFrame(float jitterX, float jitterY, uint32_t renderWidth, ui
 
     if (selectCalls % 3600 == 0)
     {
-        LOG_INFO("Game camera: {} frames, {} matched by jitter, {} newest capture, {} without camera, {} cuts, {} "
-                 "failed checks",
-                 selectCalls, selectMatched, selectNewest, selectNone, cutsFound, checkFailures);
+        LOG_DEBUG("Game camera: {} frames, {} matched by jitter, {} newest capture, {} without camera, {} cuts, {} "
+                  "failed checks",
+                  selectCalls, selectMatched, selectNewest, selectNone, cutsFound, checkFailures);
     }
 
     return true;
@@ -773,8 +773,7 @@ void GameCamera::ProbeDepth(ID3D11DeviceContext* context, ID3D11Resource* depth,
         if (!probe.unsupportedLogged)
         {
             probe.unsupportedLogged = true;
-            LOG_INFO("Game camera: depth texture format {} (bind {:X}) not probed", (UINT) desc.Format,
-                     desc.BindFlags);
+            LOG_INFO("Game camera: depth texture format {} (bind {:X}) not probed", (UINT) desc.Format, desc.BindFlags);
         }
 
         return;

@@ -575,25 +575,6 @@ class Config
     // Detect the depth convention from sampled depth texels for frame generation, default on with GameCamera
     CustomOptional<bool, NoDefault> Dx11wDx12DetectDepthInverted;
 
-    // Draw call merging (misc/DrawMerge_Dx11.cpp): consecutive DX11 indirect draws into NVAPI multi-draws,
-    // default from the game quirk; can be switched at runtime from the menu
-    CustomOptional<bool, NoDefault> DrawMergeEnabled;
-    // 0: off (hooks installed, nothing held back), 1: runs held back but issued as single draws (no NVAPI),
-    // 2: NVAPI multi-draws on the immediate context only, 3: NVAPI multi-draws everywhere (2 and 3 remove the device
-    // with Origins on current NVIDIA drivers), 4: draws of a run after the first sent past ReShade and its add-ons
-    // (needs DrawMergeAtReShadeLayer). Runtime, from the menu.
-    CustomOptional<int> DrawMergeMode { 0 };
-    // Issue the first draw of each run as a normal draw before the multi-draw
-    CustomOptional<bool> DrawMergePrimeRuns { true };
-    // Longest run merged into one multi-draw, 0 = no limit
-    CustomOptional<int> DrawMergeMaxRun { 0 };
-    // Hook ReShade's proxy context instead of the D3D11 runtime (merged draws also skip ReShade and its add-ons)
-    CustomOptional<bool> DrawMergeAtReShadeLayer { true };
-    // Also merge while graphics UAVs are bound
-    CustomOptional<bool> DrawMergeAllowUAVs { false };
-    // Log the merge statistics every N seconds (0 = never)
-    CustomOptional<int> DrawMergeStatsInterval { 10 };
-
     // vulkanwdx12
     CustomOptional<bool> VulkanUseCopyForInputs { false };
     CustomOptional<bool> VulkanUseCopyForOutput { false };

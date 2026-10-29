@@ -121,3 +121,17 @@ jobs:
         name: 'OptiScaler-dll'
         path: '${{ github.workspace }}\x64\Release\a\OptiScaler.dll'
         if-no-files-found: error
+
+    # Mod package: Frame Generation for Assassin's Creed Origins (mods\acorigins-framegen)
+    - name: Package the Assassin's Creed Origins frame generation mod
+      if: ${{ hashFiles('mods/acorigins-framegen/package.ps1') != '' }}
+      shell: powershell
+      run: |
+        powershell -NoProfile -ExecutionPolicy Bypass -File mods\acorigins-framegen\package.ps1 -BuildDir x64\Release\a -OutDir mod-package
+
+    - uses: actions/upload-artifact@v7.0.0
+      if: ${{ hashFiles('mods/acorigins-framegen/package.ps1') != '' }}
+      with:
+        name: 'ACOrigins-FrameGen'
+        path: '${{ github.workspace }}\mod-package\ACOrigins-FrameGen\'
+        if-no-files-found: error

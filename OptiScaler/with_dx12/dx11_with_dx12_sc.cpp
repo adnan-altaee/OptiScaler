@@ -16,7 +16,6 @@
 #include <misc/HiddenWindow.h>
 #include <shaders/Shader_Common.h>
 #include <misc/GameCamera.h>
-#include <misc/DrawMerge_Dx11.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -79,63 +78,8 @@ static HMODULE FindReShadeModule()
     return result;
 }
 
-static bool overlayOpen = false;
-static UINT inputLogLines = 0;
-static UINT inputLogFrame = 0;
-static uint32_t lastMouseX = UINT32_MAX;
-static uint32_t lastMouseY = UINT32_MAX;
-static bool lastLeftButton = false;
-
-// Logs what ReShade's input sees while its overlay is open (limited number of lines), to tell a mouse position
-// problem (cursor not following) from a routing problem (no button presses arriving)
-static void LogOverlayInput(reshade::api::effect_runtime* runtime)
-{
-    if (!overlayOpen || inputLogLines >= 40)
-        return;
-
-    inputLogFrame++;
-
-    uint32_t mouseX = 0;
-    uint32_t mouseY = 0;
-    runtime->get_mouse_cursor_position(&mouseX, &mouseY);
-    const bool leftButton = runtime->is_mouse_button_down(0);
-
-    const bool buttonChanged = leftButton != lastLeftButton;
-    const bool moved = mouseX != lastMouseX || mouseY != lastMouseY;
-
-    // Button changes right away, cursor moves at most twice a second
-    if (!buttonChanged && !(moved && inputLogFrame >= 30))
-        return;
-
-    inputLogFrame = 0;
-    inputLogLines++;
-    lastMouseX = mouseX;
-    lastMouseY = mouseY;
-    lastLeftButton = leftButton;
-
-    POINT cursor = {};
-    GetPhysicalCursorPos(&cursor); // GetCursorPos is hooked by ReShade while it blocks cursor warping
-
-    uint32_t width = 0;
-    uint32_t height = 0;
-    runtime->get_screenshot_width_and_height(&width, &height);
-
-    LOG_INFO("ReShade overlay input: cursor {},{} in a {}x{} frame, left button {} (screen cursor {},{})", mouseX,
-             mouseY, width, height, leftButton ? "down" : "up", cursor.x, cursor.y);
-}
-
-static bool OnReShadeOpenOverlay(reshade::api::effect_runtime* runtime, bool open, reshade::api::input_source source)
-{
-    overlayOpen = open;
-    LOG_INFO("ReShade overlay {} (source {})", open ? "opened" : "closed", (int) source);
-    return false; // never block ReShade from opening or closing it
-}
-
 static void OnReShadePresent(reshade::api::effect_runtime* runtime)
 {
-    if (runtime != nullptr)
-        LogOverlayInput(runtime);
-
     auto target = captureTarget;
     if (target == nullptr || runtime == nullptr || GetCurrentThreadId() != captureThread)
         return;
@@ -178,7 +122,6 @@ static bool EnsureRegistered()
     }
 
     registerEvent(reshade::addon_event::reshade_present, reinterpret_cast<void*>(&OnReShadePresent));
-    registerEvent(reshade::addon_event::reshade_open_overlay, reinterpret_cast<void*>(&OnReShadeOpenOverlay));
 
     // Frame generation camera from the game's constant buffers (misc/GameCamera.cpp)
     GameCamera::RegisterReShadeEvents(reinterpret_cast<void*>(registerEvent));
@@ -345,10 +288,6 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     {
         ResTrack_Dx11::HookDevice(_dx11Device);
     }
-
-    // Merge the game's consecutive indirect draws into NVAPI multi-draws (once, for the game's device)
-    if (_dx11Device != nullptr && DrawMergeDx11::IsEnabledByConfig())
-        DrawMergeDx11::Install(_dx11Device);
 
     if (WithDx12::PrepareD3D12ForD3D11(_dx11Device, D3D_FEATURE_LEVEL_11_0))
     {
@@ -538,9 +477,6 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if ((Flags & DXGI_PRESENT_TEST) != 0)
         return _real->Present(SyncInterval, Flags);
-
-    // Before anything else uses the immediate context: a run of draws still held back there belongs to this frame
-    DrawMergeDx11::OnPresent(_dx11Context);
 
     const bool dx11HudfixPresent = Config::Instance()->FGHUDFix.value_or_default() &&
                                    State::Instance().activeFgInput == FGInput::Upscaler &&
@@ -1379,13 +1315,14 @@ void Dx11wDx12SC::_SyncHiddenWindowToGameWindow()
             _mirroredClientRect = target;
             _hiddenWindowVerifyFrame = _hiddenWindowSyncFrame + 30;
             _hiddenWindowVerifyLogged = false;
-            LOG_INFO("Hidden DX11 swapchain window follows the game window: {}x{} at {},{} ({})", client.right,
-                     client.bottom, target.left, target.top, isChild ? "child" : "screen");
+            LOG_DEBUG("Hidden DX11 swapchain window follows the game window: {}x{} at {},{} ({})", client.right,
+                      client.bottom, target.left, target.top, isChild ? "child" : "screen");
         }
     }
 
     // Check that the request was actually carried out (it is not if the owning thread never pumps messages)
-    if (!_hiddenWindowVerifyLogged && _hiddenWindowVerifyFrame != 0 && _hiddenWindowSyncFrame >= _hiddenWindowVerifyFrame)
+    if (!_hiddenWindowVerifyLogged && _hiddenWindowVerifyFrame != 0 &&
+        _hiddenWindowSyncFrame >= _hiddenWindowVerifyFrame)
     {
         _hiddenWindowVerifyLogged = true;
 
@@ -1400,8 +1337,8 @@ void Dx11wDx12SC::_SyncHiddenWindowToGameWindow()
         if (hiddenClient.right == client.right && hiddenClient.bottom == client.bottom &&
             hiddenOrigin.x == gameOrigin.x && hiddenOrigin.y == gameOrigin.y)
         {
-            LOG_INFO("Hidden DX11 swapchain window matches the game window: {}x{} at {},{} (child: {})",
-                     hiddenClient.right, hiddenClient.bottom, hiddenOrigin.x, hiddenOrigin.y, isChild);
+            LOG_DEBUG("Hidden DX11 swapchain window matches the game window: {}x{} at {},{} (child: {})",
+                      hiddenClient.right, hiddenClient.bottom, hiddenOrigin.x, hiddenOrigin.y, isChild);
         }
         else
         {
@@ -1879,7 +1816,8 @@ void SetOutputColorSpaceState(DXGI_COLOR_SPACE_TYPE colorSpace)
 
 bool Dx11wDx12SC::NeedsHdr10Conversion(DXGI_FORMAT gameFormat)
 {
-    if (gameFormat != DXGI_FORMAT_R16G16B16A16_FLOAT || !Config::Instance()->Dx11wDx12HDR10Conversion.value_or_default())
+    if (gameFormat != DXGI_FORMAT_R16G16B16A16_FLOAT ||
+        !Config::Instance()->Dx11wDx12HDR10Conversion.value_or_default())
         return false;
 
     const auto fgOutput = State::Instance().activeFgOutput;
@@ -1903,7 +1841,8 @@ void Dx11wDx12SC::_UpdateHdr10State()
         const bool windowsHdr = IsWindowsHdrOn(_fgSwapChain);
 
         UINT support = 0;
-        const auto supportResult = _fgSwapChain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support);
+        const auto supportResult =
+            _fgSwapChain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support);
         const auto colorSpaceResult = _fgSwapChain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
 
         _fgColorSpaceOverridden = true;
@@ -1920,8 +1859,9 @@ void Dx11wDx12SC::_UpdateHdr10State()
         }
 
         if (!windowsHdr)
-            LOG_WARN("Windows HDR is off for this display: an HDR10 frame generation swapchain needs it on (Win+Alt+B), "
-                     "or the picture will look washed out");
+            LOG_WARN(
+                "Windows HDR is off for this display: an HDR10 frame generation swapchain needs it on (Win+Alt+B), "
+                "or the picture will look washed out");
     }
     else if (_fgColorSpaceOverridden)
     {
@@ -1992,8 +1932,8 @@ bool Dx11wDx12SC::_ConvertToHdr10(ID3D11Resource* source)
             return false;
         }
 
-        auto result = _dx11Device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
-                                                       &_hdrShader);
+        auto result =
+            _dx11Device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &_hdrShader);
         blob->Release();
 
         if (FAILED(result))

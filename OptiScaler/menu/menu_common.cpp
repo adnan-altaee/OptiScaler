@@ -40,7 +40,6 @@
 #include <memory>
 #include <type_traits>
 #include <misc/IdentifyGpu.h>
-#include <misc/DrawMerge_Dx11.h>
 #include <hooks/Amdxc64_Hooks.h>
 #include <low_latency/input/input_common.h>
 #include <hooks/Vulkan_Hooks.h>
@@ -3606,91 +3605,6 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             if (bool dontUseNTShared = config->DontUseNTShared.value_or_default();
                 ImGui::Checkbox("Don't Use NTShared", &dontUseNTShared))
                 config->DontUseNTShared = dontUseNTShared;
-
-            ImGui::Spacing();
-            ImGui::Spacing();
-        }
-    }
-
-    // Draw call merging (DX11 indirect draws into NVAPI multi-draws)
-    if (state.api == DX11 && DrawMergeDx11::IsInstalled())
-    {
-        ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader("Draw Call Merging", ImGuiTreeNodeFlags_DefaultOpen); ch.IsHeaderOpen())
-        {
-            ScopedIndent indent {};
-            ImGui::Spacing();
-
-            // NVAPI multi-draws (modes 2 and 3) remove the device with Origins on current drivers: ini only
-            const char* modeNames[] = { "Off", "Hold back only (test)", "NVAPI multi-draw, immediate (unstable)",
-                                        "NVAPI multi-draw, all (unstable)", "Skip ReShade inside runs" };
-            const int currentMode = std::clamp(config->DrawMergeMode.value_or_default(), 0, 4);
-
-            if (ImGui::BeginCombo("Merge Mode", modeNames[currentMode]))
-            {
-                for (int value : { 0, 1, 4 })
-                {
-                    if (ImGui::Selectable(modeNames[value], value == currentMode))
-                        config->DrawMergeMode = value;
-                }
-
-                ImGui::EndCombo();
-            }
-
-            ShowTooltip("Off: the hooks pass every call through.\n"
-                        "Hold back only: runs of consecutive indirect draws are collected and issued one by one "
-                        "(tests the hooks).\n"
-                        "Skip ReShade inside runs: the first draw of each run goes through ReShade and its add-ons, "
-                        "the rest straight to the driver.\nTakes effect on the next frame.");
-
-            if (bool prime = config->DrawMergePrimeRuns.value_or_default();
-                ImGui::Checkbox("Prime NVAPI Runs With A Normal Draw", &prime))
-                config->DrawMergePrimeRuns = prime;
-
-            ShowTooltip("The first draw of each run goes through the normal draw path before the multi-draw.");
-
-            const char* maxRuns[] = { "No limit", "4", "16", "64", "256", "1024" };
-            const int maxRunValues[] = { 0, 4, 16, 64, 256, 1024 };
-            int maxRunIndex = 0;
-            for (int i = 0; i < IM_ARRAYSIZE(maxRunValues); ++i)
-            {
-                if (maxRunValues[i] == config->DrawMergeMaxRun.value_or_default())
-                    maxRunIndex = i;
-            }
-
-            if (ImGui::Combo("Max Run", &maxRunIndex, maxRuns, IM_ARRAYSIZE(maxRuns)))
-                config->DrawMergeMaxRun = maxRunValues[maxRunIndex];
-
-            ShowTooltip("Longest run of draws merged into one multi-draw.");
-
-            const auto stats = DrawMergeDx11::GetStats();
-            ImGui::Text("Layer: %s", stats.reshadeLayer ? "ReShade proxy" : "D3D11 runtime");
-
-            if (stats.active)
-            {
-                ImGui::Text("%.0f indirect draws -> %.0f calls per frame", stats.drawsPerFrame, stats.callsPerFrame);
-                ImGui::Text("%.1f%% in multi-draws, average run %.1f", 100.0 * stats.mergedShare, stats.averageRun);
-
-                if (stats.bypassedPerFrame > 0.5)
-                    ImGui::Text("%.0f draws per frame skipped ReShade", stats.bypassedPerFrame);
-
-                if (stats.blockedPerFrame > 0.5)
-                    ImGui::Text("%.0f per frame not merged (UAVs or predicate bound)", stats.blockedPerFrame);
-
-                ImGui::Text("Multi-draws so far: %llu immediate, %llu deferred",
-                            (unsigned long long) stats.mdiImmediate, (unsigned long long) stats.mdiDeferred);
-            }
-            else
-            {
-                ImGui::Text("Off");
-            }
-
-            if (stats.nvapiErrors > 0)
-                ImGui::TextColored(StatusWarn(), "NVAPI errors: %llu", (unsigned long long) stats.nvapiErrors);
-
-            if (stats.listFailures > 0)
-                ImGui::TextColored(StatusWarn(), "Command list failures: %llu (merge mode limited to %d)",
-                                   (unsigned long long) stats.listFailures, stats.mode);
 
             ImGui::Spacing();
             ImGui::Spacing();

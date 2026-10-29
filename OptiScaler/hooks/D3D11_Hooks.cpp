@@ -9,7 +9,6 @@
 #include <wrapped/wrapped_swapchain.h>
 
 #include <resource_tracking/ResTrack_dx11.h>
-#include <misc/DrawMerge_Dx11.h>
 
 #include <detours/detours.h>
 
@@ -275,7 +274,6 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
     {
         LOG_INFO("Device captured");
         HookToDeviceLocal(*ppDevice);
-        DrawMergeDx11::OnDeviceCreated(*ppDevice);
     }
 
     LOG_FUNC_RESULT(result);
@@ -415,7 +413,6 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
     {
         LOG_INFO("Device captured");
         HookToDeviceLocal(*ppDevice);
-        DrawMergeDx11::OnDeviceCreated(*ppDevice);
     }
 
     if (result == S_OK && pSwapChainDesc != nullptr && ppSwapChain != nullptr && *ppSwapChain != nullptr &&

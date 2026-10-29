@@ -435,8 +435,6 @@ const std::vector<GameConfig> gameConfigs = {
     // "Unable to create a DX11 D3D Device with the required features" when OptiScaler hooks D3D11 first.
     // Frame generation gets the real camera from the game's PassParams constant buffer.
     // HUDFix can't capture from deferred contexts, so its draw and bind hooks are not installed.
-    // Draw merging (MergeIndirectDraws, [DrawMerge] Enabled=true) is not on by default: NVAPI multi-draws remove the
-    // device, and sending runs past ReShade (mode 4) did not change the CPU-bound frame rate (28 Oct 2026).
     {
         .exes = { "acorigins.exe" },
         .defaults = { WithUpscalerFGInput(FGDisableHUDFix = true) },

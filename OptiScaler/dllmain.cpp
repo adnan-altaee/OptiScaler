@@ -1284,9 +1284,6 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::AnvilPassParamsCamera)
         stringQuirks.push_back("Frame generation camera from the game's PassParams constant buffer");
 
-    if (quirks & GameQuirk::MergeIndirectDraws)
-        stringQuirks.push_back("Merge consecutive indirect draws into NVAPI multi-draws");
-
     state->detectedQuirks.append_range(stringQuirks);
     for (auto& stringQuirk : stringQuirks)
         spdlog::info("Quirk: {}", stringQuirk);
