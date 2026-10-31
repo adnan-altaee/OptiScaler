@@ -70,34 +70,6 @@ inline static LRESULT CALLBACK HiddenSwapchainWindowProc(HWND hwnd, UINT msg, WP
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-// ReShade is loaded in the process (any module exporting its add-on registration functions)
-inline bool IsReShadeLoadedForHiddenWindow()
-{
-    bool result = false;
-    auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-    if (snapshot == INVALID_HANDLE_VALUE)
-        return false;
-
-    MODULEENTRY32W entry = {};
-    entry.dwSize = sizeof(entry);
-
-    if (Module32FirstW(snapshot, &entry))
-    {
-        do
-        {
-            if (GetProcAddress(entry.hModule, "ReShadeRegisterAddon") != nullptr &&
-                GetProcAddress(entry.hModule, "ReShadeRegisterEvent") != nullptr)
-            {
-                result = true;
-                break;
-            }
-        } while (Module32NextW(snapshot, &entry));
-    }
-
-    CloseHandle(snapshot);
-    return result;
-}
-
 struct HiddenSwapchainWindowThreadStart
 {
     HANDLE ready = nullptr;
@@ -130,10 +102,12 @@ inline DWORD WINAPI HiddenSwapchainWindowThread(LPVOID param)
     return 0;
 }
 
-// When ReShade is loaded, the hidden window gets a thread of its own that always pumps messages. ReShade maps the
-// mouse through this window (it is the output window of the swapchain ReShade wraps), so it has to follow the
-// game window. The thread that creates the swapchain (usually the game's main thread) does not necessarily pump
-// messages, and then any SetWindowPos or SetParent request for a window it owns never runs (or would block).
+// The hidden window gets a thread of its own that always pumps messages. ReShade maps the mouse through this window
+// (it is the output window of the swapchain ReShade wraps), so it has to follow the game window. The thread that
+// creates the swapchain (usually the game's main thread) does not necessarily pump messages, and then any
+// SetWindowPos or SetParent request for a window it owns never runs (or would block). This used to depend on
+// finding ReShade in a module snapshot, which can fail while other threads load modules (ERROR_BAD_LENGTH); the
+// window then stayed 1x1 and ReShade's overlay ignored the mouse. The thread costs nothing without ReShade.
 inline HWND CreateHiddenSwapchainWindow()
 {
     if (g_hiddenSwapchainWindow != nullptr)
@@ -157,7 +131,7 @@ inline HWND CreateHiddenSwapchainWindow()
             throw std::runtime_error("RegisterClassExW failed");
     }
 
-    if (IsReShadeLoadedForHiddenWindow())
+    // On its own message-pump thread; falls back to a window owned by this thread if that thread cannot start
     {
         // Heap allocated and only freed once the thread has signalled, so a timeout never leaves it dangling
         auto start = new HiddenSwapchainWindowThreadStart();
