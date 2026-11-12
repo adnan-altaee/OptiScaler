@@ -194,6 +194,16 @@ bool DLSSG_Dx12::Dispatch()
 
     LOG_DEBUG("_frameCount: {}, willDispatchFrame: {}, fIndex: {}", _frameCount, willDispatchFrame, fIndex);
 
+    {
+        static int dispatchLogs = 0;
+        if (dispatchLogs < 3 && IsUsingHudless(fIndex))
+        {
+            dispatchLogs++;
+            LOG_INFO("Dispatch with a HUD-less tag: frameCount {}, willDispatchFrame {}, fIndex {}", _frameCount,
+                     willDispatchFrame, fIndex);
+        }
+    }
+
     if (!_resourceReady[fIndex].contains(FG_ResourceType::Depth) ||
         !_resourceReady[fIndex].at(FG_ResourceType::Depth) ||
         !_resourceReady[fIndex].contains(FG_ResourceType::Velocity) ||
@@ -809,6 +819,21 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
                 StreamlineProxy::SetTagForFrame()(*_frameToken, _viewport, &resourceTag, 1, fResource->cmdList);
             LOG_DEBUG("SetTagForFrame, frameId: {}, type: {} result: {} ({})", frameId, magic_enum::enum_name(type),
                       magic_enum::enum_name(result), (int32_t) result);
+
+            // HUD-less tags from a swapchain wrapper come late in the frame; log the first few for diagnosis
+            if (type == FG_ResourceType::HudlessColor)
+            {
+                static int hudlessTagLogs = 0;
+                if (hudlessTagLogs < 3)
+                {
+                    hudlessTagLogs++;
+                    LOG_INFO("HUD-less tag: frameId {}, frameCount {}, fIndex {}, index {}, lifecycle {}, "
+                             "{}x{} format {}, result {}",
+                             frameId, _frameCount, fIndex, GetIndex(), (int) resourceTag.lifecycle,
+                             resourceTag.extent.width, resourceTag.extent.height,
+                             (UINT) fResource->GetResource()->GetDesc().Format, magic_enum::enum_name(result));
+                }
+            }
 
             if (result != sl::Result::eOk)
             {

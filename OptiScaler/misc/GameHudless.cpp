@@ -91,6 +91,9 @@ void* g_lockedShader = nullptr; // identity only, not referenced
 uint64_t g_presentsWithoutReplay = 0;
 bool g_firstReplayLogged = false;
 
+// D3D12 side of the current frame's HUD-less image (owned by the Dx11wDx12 swapchain)
+std::atomic<ID3D12Resource*> g_dx12Hudless { nullptr };
+
 // Only used by the presenting thread
 uint64_t g_replaysAtLastTake = 0;
 uint64_t g_presents = 0;
@@ -434,6 +437,10 @@ ID3D11Texture2D* GameHudless::TakeCapture()
 
     return result;
 }
+
+void GameHudless::SetDx12Hudless(ID3D12Resource* resource) { g_dx12Hudless.store(resource); }
+
+ID3D12Resource* GameHudless::Dx12Hudless() { return g_dx12Hudless.load(); }
 
 void GameHudless::Release()
 {

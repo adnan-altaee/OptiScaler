@@ -15,6 +15,135 @@
 #include <imgui/ImGuiNotify.hpp>
 #include <nvsdk_ngx_vk.h>
 
+#include <misc/DeferredRelease.h>
+#include <misc/GameHudless.h>
+
+// Game HUD-less image for custom engines (misc/GameHudless.h). Streamline's DLSS-G doesn't always pass the tagged
+// HUD-less color on to the nvngx_dlssg it drives (seen in Assassin's Creed Origins: tagged and accepted every frame,
+// DLSSG.HUDLess still null at the engine). When it is missing, the game's HUD-less image is copied into a private
+// texture on the evaluate's command list and handed over in NON_PIXEL_SHADER_RESOURCE, the state of the other
+// DLSSG inputs.
+namespace GameHudlessInject
+{
+static ID3D12Resource* copy = nullptr;
+static uint64_t evaluates = 0;
+static uint64_t fromStreamline = 0;
+static uint64_t fromGame = 0;
+static bool firstLogged = false;
+
+static void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                    D3D12_RESOURCE_STATES after)
+{
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    cmdList->ResourceBarrier(1, &barrier);
+}
+
+static bool EnsureCopy(ID3D12GraphicsCommandList* cmdList, const D3D12_RESOURCE_DESC& sourceDesc)
+{
+    if (copy != nullptr)
+    {
+        const auto desc = copy->GetDesc();
+
+        if (desc.Width == sourceDesc.Width && desc.Height == sourceDesc.Height && desc.Format == sourceDesc.Format)
+            return true;
+
+        DeferredRelease::Release(copy);
+        copy = nullptr;
+    }
+
+    ID3D12Device* device = nullptr;
+    if (FAILED(cmdList->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+        return false;
+
+    D3D12_RESOURCE_DESC desc = sourceDesc;
+    desc.Alignment = 0;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    auto result =
+        device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&copy));
+    device->Release();
+
+    if (FAILED(result) || copy == nullptr)
+    {
+        LOG_ERROR("Game HUD-less copy {}x{} format {} failed: {:X}", desc.Width, desc.Height, (UINT) desc.Format,
+                  (UINT) result);
+        copy = nullptr;
+        return false;
+    }
+
+    copy->SetName(L"GameHudlessForDLSSG");
+    return true;
+}
+
+static void Inject(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, uint32_t multiFrameIndex)
+{
+    if (cmdList == nullptr || params == nullptr || !GameHudless::IsEnabled())
+        return;
+
+    evaluates++;
+
+    if (evaluates % 2400 == 0)
+    {
+        LOG_INFO("DLSSG.HUDLess in the last 2400 evaluates: {} from Streamline, {} from the game's UI composite",
+                 fromStreamline, fromGame);
+        fromStreamline = 0;
+        fromGame = 0;
+    }
+
+    // Our own copy from an earlier evaluate can still be set on this parameter object
+    ID3D12Resource* current = nullptr;
+    params->Get("DLSSG.HUDLess", &current);
+
+    if (current != nullptr && current != copy)
+    {
+        fromStreamline++;
+        return;
+    }
+
+    auto shared = GameHudless::Dx12Hudless();
+    if (shared == nullptr)
+    {
+        if (current != nullptr)
+            params->Set("DLSSG.HUDLess", (void*) nullptr);
+
+        return;
+    }
+
+    const auto sharedDesc = shared->GetDesc();
+    if (!EnsureCopy(cmdList, sharedDesc))
+        return;
+
+    // Once per real frame; the later generated frames of a multi-frame set reuse it
+    if (multiFrameIndex <= 1 || current != copy)
+    {
+        Barrier(cmdList, copy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmdList->CopyResource(copy, shared); // the shared texture is in COMMON, promoted to COPY_SOURCE
+        Barrier(cmdList, copy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    // cast to make sure it's void*, see Nvngx_DllProxy
+    params->Set("DLSSG.HUDLess", (void*) copy);
+    fromGame++;
+
+    if (!firstLogged)
+    {
+        firstLogged = true;
+        LOG_INFO("DLSSG.HUDLess missing from Streamline: handing the game's HUD-less image ({}x{}, format {}) to the "
+                 "frame generation engine",
+                 sharedDesc.Width, sharedDesc.Height, (UINT) sharedDesc.Format);
+    }
+}
+} // namespace GameHudlessInject
+
 IFGNvngx* Nvngx_FG::getProvider()
 {
     if (_provider)
@@ -399,6 +528,8 @@ NVSDK_NGX_Result Nvngx_FG::D3D12_EvaluateFeature(ID3D12GraphicsCommandList* InCm
 
     if (Config::Instance()->NvngxFGDisableHudless.value_or_default())
         InParameters->Set("DLSSG.HUDLess", (void*) nullptr);
+    else
+        GameHudlessInject::Inject(InCmdList, InParameters, frameIndex);
 
     // LOG_TRACE("Handle received from the game: {:X}", (uint64_t) InFeatureHandle);
 

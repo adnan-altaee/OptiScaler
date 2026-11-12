@@ -3,6 +3,8 @@
 #include <d3d11.h>
 #include <cstdint>
 
+struct ID3D12Resource;
+
 // HUD-less image for frame generation in AnvilNext games (Assassin's Creed Origins, Dx11withDx12 with ReShade).
 //
 // The game renders the finished scene and its HUD into two separate textures and combines them onto the back
@@ -32,4 +34,11 @@ ID3D11Texture2D* TakeCapture();
 
 // Releases the capture texture (swapchain resize/destroy). The next composite recreates it.
 void Release();
+
+// The D3D12 side of the HUD-less image of the frame being presented (the Dx11wDx12 swapchain's shared copy, in
+// D3D12_RESOURCE_STATE_COMMON), or nullptr. Set by the swapchain every present, cleared before it is released.
+// Streamline's DLSS-G does not always pass the tagged HUD-less color on to the nvngx_dlssg it drives, so the NGX
+// replacement path (framegen/nvngx/Nvngx_FG.cpp) hands this one to custom engines itself when it is missing.
+void SetDx12Hudless(ID3D12Resource* resource);
+ID3D12Resource* Dx12Hudless();
 } // namespace GameHudless

@@ -555,6 +555,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (hudlessWritten)
         _PublishHudless();
+    else
+        GameHudless::SetDx12Hudless(nullptr);
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -2243,6 +2245,7 @@ void Dx11wDx12SC::_PublishHudless()
     if (fg == nullptr || !fg->IsActive() || fg->IsPaused() || _currentFakeIndex >= _openedHudless.size() ||
         _openedHudless[_currentFakeIndex] == nullptr)
     {
+        GameHudless::SetDx12Hudless(nullptr);
         return;
     }
 
@@ -2251,6 +2254,9 @@ void Dx11wDx12SC::_PublishHudless()
         return;
 
     const auto desc = _openedHudless[_currentFakeIndex]->GetDesc();
+
+    // For the NGX replacement path (custom DLSSG engines), see GameHudless::Dx12Hudless
+    GameHudless::SetDx12Hudless(_openedHudless[_currentFakeIndex]);
 
     Dx12Resource resource = {};
     resource.type = FG_ResourceType::HudlessColor;
@@ -2276,6 +2282,8 @@ void Dx11wDx12SC::_PublishHudless()
 
 void Dx11wDx12SC::_ReleaseHudlessResources()
 {
+    GameHudless::SetDx12Hudless(nullptr);
+
     for (auto& uav : _hdrHudlessUavs)
         SafeRelease(uav);
 
