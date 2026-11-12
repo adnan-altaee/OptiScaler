@@ -81,7 +81,11 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 
   private:
     bool _CopyToShared(ID3D11Resource* source);
-    bool _ConvertToHdr10(ID3D11Resource* source);
+    bool _ConvertToHdr10(ID3D11Resource* source, ID3D11Texture2D* target, ID3D11UnorderedAccessView*& targetUav);
+    bool _RequestSharedHudless();
+    bool _WriteHudlessToShared();
+    void _PublishHudless();
+    void _ReleaseHudlessResources();
     void _UpdateHdr10State();
     void _ReleaseHdr10Resources(bool releaseShader);
     bool _InitInteropObjects();
@@ -141,6 +145,15 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     std::vector<ID3D12Resource*> _openedDx11BackBuffers;
     std::vector<HANDLE> _sharedBackBufferHandles;
     std::vector<D3D12_RESOURCE_STATES> _openedDx11BackBufferStates;
+
+    // HUD-less image for frame generation (misc/GameHudless.h), one shared copy per back buffer copy, in the
+    // same format (HDR10-converted like the back buffer when HDR10 conversion is on)
+    std::vector<ID3D11Texture2D*> _sharedHudlessCopies;
+    std::vector<HANDLE> _sharedHudlessHandles;
+    std::vector<ID3D12Resource*> _openedHudless;
+    std::vector<ID3D11UnorderedAccessView*> _hdrHudlessUavs;
+    bool _hudlessErrorLogged = false;
+    bool _hudlessPublishLogged = false;
 
     UINT _bufferCount = 0;
     UINT _currentFakeIndex = 0;

@@ -10,6 +10,8 @@
 #include <imgui/imgui_impl_dx12.h>
 #include <imgui/imgui_impl_win32.h>
 
+#include <mutex>
+
 #include "menu_common.h"
 #include <shaders/menu_blur/MenuBlur_Dx11.h>
 #include <shaders/menu_blur/MenuBlur_Dx12.h>
@@ -38,6 +40,11 @@ static ID3D12CommandAllocator* g_commandAllocators[NUM_BACK_BUFFERS] = {};
 static ID3D12Resource* g_mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
 static D3D12_CPU_DESCRIPTOR_HANDLE g_mainRenderTargetDescriptor[NUM_BACK_BUFFERS] = {};
 static std::unique_ptr<MenuBlur_Dx12> g_menuBlur;
+
+// Frame generation presents (and draws this overlay) from its own thread while ResizeBuffers/FG restarts can tear
+// the DX12 renderer down from another; ImGui_ImplDX12_RenderDrawData with a shut down backend writes through a null
+// pointer. Overlay init, render and cleanup are serialized. Recursive: the render path cleans up on its errors.
+static std::recursive_mutex g_overlayMutex;
 
 // Tracks GPU completion of menu command lists so an allocator is never reset while still executing
 static ID3D12Fence* g_menuFence = nullptr;
@@ -596,7 +603,9 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 g_pd3dCommandList->OMSetRenderTargets(1, &g_mainRenderTargetDescriptor[backBufferIdx], FALSE, NULL);
                 g_pd3dCommandList->SetDescriptorHeaps(1, &g_pd3dSrvDescHeap);
 
-                ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3dCommandList);
+                // Shut down from elsewhere since the check above (should not happen with g_overlayMutex)
+                if (ImGui::GetIO().BackendRendererUserData != nullptr)
+                    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3dCommandList);
 
                 barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
@@ -652,6 +661,8 @@ void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
         fg->Deactivate();
     }
 
+    std::lock_guard<std::recursive_mutex> lock(g_overlayMutex);
+
     if (_dx11Device)
         CleanupRenderTargetDx11(false);
     else
@@ -668,6 +679,8 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 
     LOG_DEBUG("");
+
+    std::lock_guard<std::recursive_mutex> lock(g_overlayMutex);
 
     ID3D12CommandQueue* cq = nullptr;
     ID3D11Device* device = nullptr;

@@ -1285,6 +1285,9 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::AnvilPassParamsCamera)
         stringQuirks.push_back("Frame generation camera from the game's PassParams constant buffer");
 
+    if (quirks & GameQuirk::AnvilUICompositeHudless)
+        stringQuirks.push_back("Frame generation HUD-less image from the game's UI composite draw");
+
     state->detectedQuirks.append_range(stringQuirks);
     for (auto& stringQuirk : stringQuirks)
         spdlog::info("Quirk: {}", stringQuirk);

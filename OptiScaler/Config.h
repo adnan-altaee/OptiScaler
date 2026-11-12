@@ -574,6 +574,9 @@ class Config
     CustomOptional<bool> Dx11wDx12HDR10InputIsPQ { false };
     // Frame generation camera from the game's constant buffers (misc/GameCamera.cpp), default from the game quirk
     CustomOptional<bool, NoDefault> Dx11wDx12GameCamera;
+    // Frame generation HUD-less image from the game's UI composite draw (misc/GameHudless.cpp), default from the
+    // game quirk; needs ReShade (the draw is seen through ReShade's add-on events)
+    CustomOptional<bool, NoDefault> Dx11wDx12HudlessFromUI;
     // Detect the depth convention from sampled depth texels for frame generation, default on with GameCamera
     CustomOptional<bool, NoDefault> Dx11wDx12DetectDepthInverted;
 

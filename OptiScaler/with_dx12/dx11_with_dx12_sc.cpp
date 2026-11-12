@@ -16,6 +16,7 @@
 #include <misc/HiddenWindow.h>
 #include <shaders/Shader_Common.h>
 #include <misc/GameCamera.h>
+#include <misc/GameHudless.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -23,6 +24,8 @@
 #include <dxgi1_6.h>
 
 #include <tlhelp32.h>
+
+#include <format>
 
 // ReShade add-on API (v6.8.0, API version 20). Only the API and event headers are used, not reshade.hpp,
 // so ReShade's Dear ImGui function table header is never pulled into this translation unit.
@@ -125,6 +128,9 @@ static bool EnsureRegistered()
 
     // Frame generation camera from the game's constant buffers (misc/GameCamera.cpp)
     GameCamera::RegisterReShadeEvents(reinterpret_cast<void*>(registerEvent));
+
+    // HUD-less image from the game's UI composite draw (misc/GameHudless.cpp)
+    GameHudless::RegisterReShadeEvents(reinterpret_cast<void*>(registerEvent));
 
     state = 1;
     LOG_INFO("Registered with ReShade; Dx11wDx12 will capture frames after ReShade's effects and overlay");
@@ -535,6 +541,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_capturedFromReShade && !_CopyDx11BackBufferToShared(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
 
+    // HUD-less image next to the back buffer copy, on the same D3D11 timeline (synchronized by the wait below)
+    const bool hudlessWritten = _WriteHudlessToShared();
+
     if (!_WaitDx11ThenDx12())
         return DXGI_ERROR_DEVICE_REMOVED;
 
@@ -543,6 +552,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (!_WaitForInteropCopyOnPresentQueue())
         return DXGI_ERROR_DEVICE_REMOVED;
+
+    if (hudlessWritten)
+        _PublishHudless();
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -1622,6 +1634,7 @@ void Dx11wDx12SC::_ReleaseInteropBackBuffers()
     _interopInitialized = false;
 
     _ReleaseHdr10Resources(false);
+    _ReleaseHudlessResources();
 
     for (auto& resource : _openedDx11BackBuffers)
         SafeRelease(resource);
@@ -1908,7 +1921,11 @@ bool Dx11wDx12SC::_CopyToShared(ID3D11Resource* source)
         return true;
     }
 
-    if (!_ConvertToHdr10(source) && !_hdr10ErrorLogged)
+    if (_hdrSharedUavs.size() < _sharedDx11BackBufferCopies.size())
+        _hdrSharedUavs.resize(_sharedDx11BackBufferCopies.size(), nullptr);
+
+    if (!_ConvertToHdr10(source, _sharedDx11BackBufferCopies[_currentFakeIndex], _hdrSharedUavs[_currentFakeIndex]) &&
+        !_hdr10ErrorLogged)
     {
         _hdr10ErrorLogged = true;
         LOG_ERROR("HDR10 conversion failed, frame generation gets no new frames");
@@ -1918,9 +1935,10 @@ bool Dx11wDx12SC::_CopyToShared(ID3D11Resource* source)
     return true;
 }
 
-bool Dx11wDx12SC::_ConvertToHdr10(ID3D11Resource* source)
+bool Dx11wDx12SC::_ConvertToHdr10(ID3D11Resource* source, ID3D11Texture2D* target,
+                                  ID3D11UnorderedAccessView*& targetUav)
 {
-    if (_dx11Device == nullptr || _hdrShaderFailed)
+    if (_dx11Device == nullptr || _hdrShaderFailed || source == nullptr || target == nullptr)
         return false;
 
     if (_hdrShader == nullptr)
@@ -2010,14 +2028,10 @@ bool Dx11wDx12SC::_ConvertToHdr10(ID3D11Resource* source)
         }
     }
 
-    if (_hdrSharedUavs.size() < _sharedDx11BackBufferCopies.size())
-        _hdrSharedUavs.resize(_sharedDx11BackBufferCopies.size(), nullptr);
-
-    auto& uav = _hdrSharedUavs[_currentFakeIndex];
+    auto& uav = targetUav;
     if (uav == nullptr)
     {
-        auto result =
-            _dx11Device->CreateUnorderedAccessView(_sharedDx11BackBufferCopies[_currentFakeIndex], nullptr, &uav);
+        auto result = _dx11Device->CreateUnorderedAccessView(target, nullptr, &uav);
         if (FAILED(result))
         {
             LOG_ERROR("HDR10 shared copy UAV failed: {:X}", (UINT) result);
@@ -2026,7 +2040,7 @@ bool Dx11wDx12SC::_ConvertToHdr10(ID3D11Resource* source)
     }
 
     D3D11_TEXTURE2D_DESC targetDesc = {};
-    _sharedDx11BackBufferCopies[_currentFakeIndex]->GetDesc(&targetDesc);
+    target->GetDesc(&targetDesc);
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     auto result = _dx11Context->Map(_hdrConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
@@ -2080,4 +2094,204 @@ bool Dx11wDx12SC::_ConvertToHdr10(ID3D11Resource* source)
     SafeRelease(oldConstants);
 
     return true;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// HUD-less image for frame generation (misc/GameHudless.h)
+//
+// GameHudless replays the game's UI composite draw without the HUD into a texture of its own. Here it is copied
+// (or HDR10-converted, exactly like the back buffer) into a shared texture next to the back buffer copy and tagged
+// as the frame's HUD-less color. Frame generation then interpolates the HUD-less image and puts the real frame's
+// HUD (and ReShade's overlay, which is in the back buffer copy) back on top instead of warping it.
+// A frame without a capture gets the frame itself as its HUD-less image, so frame generation never reads a stale
+// one from an earlier frame.
+// ---------------------------------------------------------------------------------------------------------------
+
+bool Dx11wDx12SC::_RequestSharedHudless()
+{
+    if (_dx11Device == nullptr || _dx12Device == nullptr || _currentFakeIndex >= _sharedDx11BackBufferCopies.size() ||
+        _sharedDx11BackBufferCopies[_currentFakeIndex] == nullptr)
+    {
+        return false;
+    }
+
+    const auto count = _sharedDx11BackBufferCopies.size();
+
+    if (_sharedHudlessCopies.size() < count)
+        _sharedHudlessCopies.resize(count, nullptr);
+
+    if (_sharedHudlessHandles.size() < count)
+        _sharedHudlessHandles.resize(count, nullptr);
+
+    if (_openedHudless.size() < count)
+        _openedHudless.resize(count, nullptr);
+
+    if (_hdrHudlessUavs.size() < count)
+        _hdrHudlessUavs.resize(count, nullptr);
+
+    if (_openedHudless[_currentFakeIndex] != nullptr)
+        return true;
+
+    // Same description as the back buffer copy: same format, size and bind flags, shared through an NT handle
+    D3D11_TEXTURE2D_DESC desc = {};
+    _sharedDx11BackBufferCopies[_currentFakeIndex]->GetDesc(&desc);
+
+    auto result = _dx11Device->CreateTexture2D(&desc, nullptr, &_sharedHudlessCopies[_currentFakeIndex]);
+    if (FAILED(result) || _sharedHudlessCopies[_currentFakeIndex] == nullptr)
+    {
+        LOG_ERROR("HUD-less shared texture {} failed: {:X}", _currentFakeIndex, (UINT) result);
+        return false;
+    }
+
+    IDXGIResource1* dxgiResource = nullptr;
+    result = _sharedHudlessCopies[_currentFakeIndex]->QueryInterface(IID_PPV_ARGS(&dxgiResource));
+    if (FAILED(result) || dxgiResource == nullptr)
+    {
+        LOG_ERROR("HUD-less IDXGIResource1 query {} failed: {:X}", _currentFakeIndex, (UINT) result);
+        SafeRelease(_sharedHudlessCopies[_currentFakeIndex]);
+        return false;
+    }
+
+    result = dxgiResource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr,
+                                              &_sharedHudlessHandles[_currentFakeIndex]);
+    dxgiResource->Release();
+
+    if (FAILED(result) || _sharedHudlessHandles[_currentFakeIndex] == nullptr)
+    {
+        LOG_ERROR("HUD-less CreateSharedHandle {} failed: {:X}", _currentFakeIndex, (UINT) result);
+        SafeRelease(_sharedHudlessCopies[_currentFakeIndex]);
+        return false;
+    }
+
+    result = _dx12Device->OpenSharedHandle(_sharedHudlessHandles[_currentFakeIndex],
+                                           IID_PPV_ARGS(&_openedHudless[_currentFakeIndex]));
+
+    if (FAILED(result) || _openedHudless[_currentFakeIndex] == nullptr)
+    {
+        LOG_ERROR("HUD-less OpenSharedHandle {} failed: {:X}", _currentFakeIndex, (UINT) result);
+        SafeCloseHandle(_sharedHudlessHandles[_currentFakeIndex]);
+        SafeRelease(_sharedHudlessCopies[_currentFakeIndex]);
+        return false;
+    }
+
+    _openedHudless[_currentFakeIndex]->SetName(std::format(L"HudlessShared[{}]", _currentFakeIndex).c_str());
+
+    LOG_INFO("HUD-less shared texture {} {}x{} format {}", _currentFakeIndex, desc.Width, desc.Height,
+             (UINT) desc.Format);
+    return true;
+}
+
+bool Dx11wDx12SC::_WriteHudlessToShared()
+{
+    const bool enabled = GameHudless::IsEnabled();
+
+    // What the next frame's composite has to match: the game's back buffer
+    DXGI_SWAP_CHAIN_DESC gameDesc = {};
+    const bool haveDesc = _real != nullptr && SUCCEEDED(_real->GetDesc(&gameDesc));
+    const bool active = enabled && haveDesc && _fg != nullptr && Config::Instance()->FGEnabled.value_or_default() &&
+                        State::Instance().activeFgOutput != FGOutput::NoFG;
+
+    GameHudless::SetTarget(active, gameDesc.BufferDesc.Width, gameDesc.BufferDesc.Height, gameDesc.BufferDesc.Format);
+
+    if (!enabled || _fg == nullptr || _dx11Context == nullptr)
+        return false;
+
+    // Taken every present (also while inactive) so a capture is never handed to a later frame
+    auto capture = GameHudless::TakeCapture();
+
+    if (!active || !_RequestSharedHudless())
+    {
+        SafeRelease(capture);
+        return false;
+    }
+
+    auto target = _sharedHudlessCopies[_currentFakeIndex];
+    bool written = false;
+
+    if (capture != nullptr)
+    {
+        if (_hdr10Active)
+        {
+            written = _ConvertToHdr10(capture, target, _hdrHudlessUavs[_currentFakeIndex]);
+        }
+        else
+        {
+            _dx11Context->CopyResource(target, capture);
+            written = true;
+        }
+
+        capture->Release();
+
+        if (!written && !_hudlessErrorLogged)
+        {
+            _hudlessErrorLogged = true;
+            LOG_WARN("HUD-less HDR10 conversion failed, frame generation gets the frame itself as HUD-less");
+        }
+    }
+
+    // No capture this frame: the frame itself (already converted when HDR10 is on)
+    if (!written)
+        _dx11Context->CopyResource(target, _sharedDx11BackBufferCopies[_currentFakeIndex]);
+
+    return true;
+}
+
+void Dx11wDx12SC::_PublishHudless()
+{
+    auto fg = _fg;
+
+    if (fg == nullptr || !fg->IsActive() || fg->IsPaused() || _currentFakeIndex >= _openedHudless.size() ||
+        _openedHudless[_currentFakeIndex] == nullptr)
+    {
+        return;
+    }
+
+    auto cmdList = fg->GetUICommandList();
+    if (cmdList == nullptr)
+        return;
+
+    const auto desc = _openedHudless[_currentFakeIndex]->GetDesc();
+
+    Dx12Resource resource = {};
+    resource.type = FG_ResourceType::HudlessColor;
+    resource.resource = _openedHudless[_currentFakeIndex];
+    resource.left = 0;
+    resource.top = 0;
+    resource.width = desc.Width;
+    resource.height = desc.Height;
+    resource.cmdList = cmdList;
+    resource.state = D3D12_RESOURCE_STATE_COMMON;
+    resource.validity = FG_ResourceValidity::ValidNow;
+    resource.frameIndex = fg->GetIndexWillBeDispatched();
+
+    const bool accepted = fg->SetResource(&resource);
+
+    if (!_hudlessPublishLogged)
+    {
+        _hudlessPublishLogged = true;
+        LOG_INFO("HUD-less image given to frame generation ({}x{}, format {}): {}", desc.Width, desc.Height,
+                 (UINT) desc.Format, accepted ? "accepted" : "not accepted");
+    }
+}
+
+void Dx11wDx12SC::_ReleaseHudlessResources()
+{
+    for (auto& uav : _hdrHudlessUavs)
+        SafeRelease(uav);
+
+    for (auto& resource : _openedHudless)
+        SafeRelease(resource);
+
+    for (auto& texture : _sharedHudlessCopies)
+        SafeRelease(texture);
+
+    for (auto& handle : _sharedHudlessHandles)
+        SafeCloseHandle(handle);
+
+    _hdrHudlessUavs.clear();
+    _openedHudless.clear();
+    _sharedHudlessCopies.clear();
+    _sharedHudlessHandles.clear();
+
+    GameHudless::Release();
 }
