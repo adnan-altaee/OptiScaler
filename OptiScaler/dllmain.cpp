@@ -49,6 +49,7 @@
 #include <magic_enum.hpp>
 #include <version_check.h>
 #include <misc/IdentifyGpu.h>
+#include <misc/CustomProviders.h>
 #include <sha1/sha1.hpp>
 
 static std::vector<HMODULE> _asiHandles;
@@ -1619,6 +1620,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::info("Setting DllPath to {}", wstring_to_string(Config::Instance()->MainDllPath.value()));
         spdlog::info("");
 
+        CustomProviders::ResolveFGNvngx();
+
 #ifdef VER_PRE_RELEASE
         spdlog::info("Pre-release build, disabling update checks");
         Config::Instance()->CheckForUpdate.set_volatile_value(false);
@@ -1628,6 +1631,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         State::Instance().activeFgInput = Config::Instance()->FGInput.value_or_default();
         State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
         State::Instance().activeFgNvngx = Config::Instance()->FGNvngxReplacement.value_or_default();
+        State::Instance().activeFgNvngxCustom = State::Instance().fgNvngxCustom;
 
         // Ensure valid FG configuration
         if (State::Instance().activeFgOutput == FGOutput::NoFG && State::Instance().activeFgInput != FGInput::NoFG &&
