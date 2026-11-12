@@ -18,11 +18,11 @@
 #include <misc/DeferredRelease.h>
 #include <misc/GameHudless.h>
 
-// Game HUD-less image for custom engines (misc/GameHudless.h). Streamline's DLSS-G doesn't always pass the tagged
-// HUD-less color on to the nvngx_dlssg it drives (seen in Assassin's Creed Origins: tagged and accepted every frame,
-// DLSSG.HUDLess still null at the engine). When it is missing, the game's HUD-less image is copied into a private
-// texture on the evaluate's command list and handed over in NON_PIXEL_SHADER_RESOURCE, the state of the other
-// DLSSG inputs.
+// Game HUD-less image for DLSSG (misc/GameHudless.h), NVIDIA's own and replacements. Streamline's DLSS-G doesn't
+// always pass the tagged HUD-less color on to the nvngx_dlssg it drives (seen in Assassin's Creed Origins: tagged and
+// accepted every frame, DLSSG.HUDLess still null at the engine). Its NGX calls come through OptiScaler, so when it
+// is missing, the game's HUD-less image is copied into a private texture on the evaluate's command list and handed
+// over in NON_PIXEL_SHADER_RESOURCE, the state of the other DLSSG inputs.
 namespace GameHudlessInject
 {
 static ID3D12Resource* copy = nullptr;
@@ -143,6 +143,17 @@ static void Inject(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
     }
 }
 } // namespace GameHudlessInject
+
+void Nvngx_FG::InjectGameHudless(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Parameter* InParameters)
+{
+    if (InParameters == nullptr || Config::Instance()->FGDisableHudless.value_or_default())
+        return;
+
+    uint32_t multiFrameIndex = 1;
+    InParameters->Get("DLSSG.MultiFrameIndex", &multiFrameIndex);
+
+    GameHudlessInject::Inject(InCmdList, InParameters, multiFrameIndex);
+}
 
 IFGNvngx* Nvngx_FG::getProvider()
 {
@@ -528,8 +539,6 @@ NVSDK_NGX_Result Nvngx_FG::D3D12_EvaluateFeature(ID3D12GraphicsCommandList* InCm
 
     if (Config::Instance()->NvngxFGDisableHudless.value_or_default())
         InParameters->Set("DLSSG.HUDLess", (void*) nullptr);
-    else
-        GameHudlessInject::Inject(InCmdList, InParameters, frameIndex);
 
     // LOG_TRACE("Handle received from the game: {:X}", (uint64_t) InFeatureHandle);
 

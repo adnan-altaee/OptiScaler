@@ -1133,6 +1133,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
 
         if (InParameters->Get("DLSSG.CameraFar", &dlssgCameraFar) == NVSDK_NGX_Result_Success)
             lastDlssgCameraFar = dlssgCameraFar;
+
+        // The game's HUD-less image when Streamline didn't pass one (NVIDIA's DLSSG and replacements alike)
+        Nvngx_FG::InjectGameHudless(InCmdList, InParameters);
     }
     else if (fgCreated)
     {

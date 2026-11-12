@@ -28,6 +28,10 @@ class Nvngx_FG
     static IFGNvngx* getProvider();
 
   public:
+    // Hands the game's HUD-less image (misc/GameHudless.h) to a DLSSG evaluate whose DLSSG.HUDLess Streamline left
+    // empty. Called for every DLSSG evaluate that passes through OptiScaler's NGX: NVIDIA's own and replacements.
+    static void InjectGameHudless(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Parameter* InParameters);
+
     static int getMaxFakeFramesCount();
     static bool isDx12Available();
     static bool isVulkanAvailable();
