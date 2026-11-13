@@ -11,8 +11,10 @@ struct ID3D12Resource;
 // buffer in one full-screen draw ("UICompositingParameters", ps 0e86ea53 in SDR):
 //     back buffer = (scene * (1 - hud.a) + hud) ^ Brightness      hud at ps t86, scene at ps t87
 // That draw is replayed once more, into a texture of our own, with t86 unbound (D3D11 reads 0 from an unbound
-// slot). The result is exactly what the back buffer would hold without the HUD, brightness included. It works the
-// same when the draw is recorded on a deferred context, where OptiScaler's HUDFix can't capture.
+// slot), starting from a copy of the render target and with the game's own blend state. The result is what the
+// back buffer would hold without the HUD, also when another add-on has already put the scene into the back buffer
+// and the composite only blends the HUD on top (gameplay with DLSS 5 neural rendering). It works the same when
+// the draw is recorded on a deferred context, where OptiScaler's HUDFix can't capture.
 //
 // Frame generation (DLSS-G, or a custom DLSSG engine such as ANR FG) then interpolates the HUD-less image and lays
 // the real frame's HUD (and ReShade's overlay) back on top instead of warping it with the scene.

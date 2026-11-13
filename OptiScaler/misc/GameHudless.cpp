@@ -94,6 +94,7 @@ constexpr uint64_t kUnlockPresents = 240;
 void* g_lockedShader = nullptr; // identity only, not referenced
 uint64_t g_presentsWithoutReplay = 0;
 bool g_firstReplayLogged = false;
+uint64_t g_lastBlendKey = ~0ull;
 
 // D3D12 side: HUD-less image per frame generation back buffer
 struct Dx12Entry
@@ -200,9 +201,33 @@ bool EnsureTextureLocked(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& targe
 
 // Draws the composite once more into the capture texture with the HUD slot unbound, then puts back what the game
 // had bound so its own draw (which runs right after this event) is untouched
-void Replay(ID3D11DeviceContext* context, ID3D11RenderTargetView* gameRtv, ID3D11ShaderResourceView* hudSrv,
-            const D3D11_TEXTURE2D_DESC& targetDesc, DXGI_FORMAT viewFormat, ID3D11PixelShader* shader,
-            uint32_t vertexCount, uint32_t firstVertex)
+// What the game's draw blends with, logged once and again when it changes
+void LogBlendState(ID3D11BlendState* blendState, bool copied)
+{
+    D3D11_BLEND_DESC desc = {};
+    if (blendState != nullptr)
+        blendState->GetDesc(&desc);
+
+    const auto& rt = desc.RenderTarget[0];
+    const uint64_t key = (blendState == nullptr ? 1ull : 0ull) | (uint64_t) rt.BlendEnable << 1 |
+                         (uint64_t) rt.SrcBlend << 2 | (uint64_t) rt.DestBlend << 8 | (uint64_t) rt.BlendOp << 14 |
+                         (uint64_t) rt.SrcBlendAlpha << 18 | (uint64_t) rt.DestBlendAlpha << 24 |
+                         (uint64_t) rt.RenderTargetWriteMask << 30 | (uint64_t) copied << 34;
+
+    if (key == g_lastBlendKey)
+        return;
+
+    g_lastBlendKey = key;
+    LOG_INFO("HUD-less: UI composite blend {} (src {}, dest {}, op {}, alpha src {} dest {}, write mask {:X}); "
+             "replay starts from {}",
+             blendState == nullptr ? "default (off)" : (rt.BlendEnable ? "on" : "off"), (int) rt.SrcBlend,
+             (int) rt.DestBlend, (int) rt.BlendOp, (int) rt.SrcBlendAlpha, (int) rt.DestBlendAlpha,
+             (UINT) rt.RenderTargetWriteMask, copied ? "a copy of the render target" : "an empty texture");
+}
+
+void Replay(ID3D11DeviceContext* context, ID3D11RenderTargetView* gameRtv, ID3D11Texture2D* target,
+            ID3D11ShaderResourceView* hudSrv, const D3D11_TEXTURE2D_DESC& targetDesc, DXGI_FORMAT viewFormat,
+            ID3D11PixelShader* shader, uint32_t vertexCount, uint32_t firstVertex)
 {
     ID3D11Device* device = nullptr;
     context->GetDevice(&device);
@@ -224,27 +249,40 @@ void Replay(ID3D11DeviceContext* context, ID3D11RenderTargetView* gameRtv, ID3D1
     if (!ready)
         return;
 
+    // Start from what the render target holds right before the composite and draw with the game's own blend
+    // state. In gameplay the scene is already in the back buffer when the composite runs (put there by another
+    // add-on, e.g. DLSS 5 neural rendering) and the composite only blends the HUD on top; replayed into an empty
+    // texture with blending off that gave a black image. Starting from a copy covers both cases: an opaque
+    // composite overwrites the copy, a blending one leaves the scene and adds nothing (the HUD is unbound).
+    D3D11_TEXTURE2D_DESC sourceDesc = {};
+    target->GetDesc(&sourceDesc);
+
+    const bool copied = TypelessFamily(sourceDesc.Format) == TypelessFamily(g_textureDesc.Format) &&
+                        sourceDesc.Width == g_textureDesc.Width && sourceDesc.Height == g_textureDesc.Height &&
+                        sourceDesc.MipLevels == 1 && sourceDesc.ArraySize == 1;
+
+    if (copied)
+        context->CopyResource(g_texture, target);
+
     ID3D11BlendState* blendState = nullptr;
     FLOAT blendFactor[4] = {};
     UINT sampleMask = 0;
     context->OMGetBlendState(&blendState, blendFactor, &sampleMask);
+    LogBlendState(blendState, copied);
+    SafeRelease(blendState);
 
     ID3D11ShaderResourceView* noHud = nullptr;
 
     // UAVs bound next to the render target (none in Origins) are kept
     context->OMSetRenderTargetsAndUnorderedAccessViews(1, &g_rtv, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
                                                        nullptr, nullptr);
-    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
     context->PSSetShaderResources(kHudSlot, 1, &noHud);
 
     context->Draw(vertexCount, firstVertex);
 
     context->PSSetShaderResources(kHudSlot, 1, &hudSrv);
-    context->OMSetBlendState(blendState, blendFactor, sampleMask);
     context->OMSetRenderTargetsAndUnorderedAccessViews(1, &gameRtv, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
                                                        nullptr, nullptr);
-
-    SafeRelease(blendState);
 
     if (g_lockedShader == nullptr)
     {
@@ -340,7 +378,7 @@ bool OnDraw(reshade::api::command_list* cmdList, uint32_t vertexCount, uint32_t 
         if (shader == nullptr)
             break;
 
-        Replay(context, rtvs[0], srvs[0], targetDesc, rtvDesc.Format, shader, vertexCount, firstVertex);
+        Replay(context, rtvs[0], target, srvs[0], targetDesc, rtvDesc.Format, shader, vertexCount, firstVertex);
     } while (false);
 
     SafeRelease(shader);
