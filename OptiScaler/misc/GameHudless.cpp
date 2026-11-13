@@ -4,8 +4,12 @@
 #include <Config.h>
 #include <State.h>
 
+#include <misc/DeferredRelease.h>
+
 #include <atomic>
+#include <d3d12.h>
 #include <mutex>
+#include <vector>
 
 // ReShade add-on API (v6.8.0, API version 20), events only
 #include "../../external/reshade/include/reshade_events.hpp"
@@ -91,8 +95,17 @@ void* g_lockedShader = nullptr; // identity only, not referenced
 uint64_t g_presentsWithoutReplay = 0;
 bool g_firstReplayLogged = false;
 
-// D3D12 side of the current frame's HUD-less image (owned by the Dx11wDx12 swapchain)
-std::atomic<ID3D12Resource*> g_dx12Hudless { nullptr };
+// D3D12 side: HUD-less image per frame generation back buffer
+struct Dx12Entry
+{
+    ID3D12Resource* backBuffer = nullptr; // identity only, not referenced
+    ID3D12Resource* hudless = nullptr;    // referenced
+    uint64_t serial = 0;
+};
+
+std::mutex g_dx12Mutex;
+std::vector<Dx12Entry> g_dx12Entries;
+uint64_t g_dx12Serial = 0;
 
 // Only used by the presenting thread
 uint64_t g_replaysAtLastTake = 0;
@@ -438,9 +451,79 @@ ID3D11Texture2D* GameHudless::TakeCapture()
     return result;
 }
 
-void GameHudless::SetDx12Hudless(ID3D12Resource* resource) { g_dx12Hudless.store(resource); }
+void GameHudless::PublishDx12(ID3D12Resource* fgBackBuffer, ID3D12Resource* hudless)
+{
+    if (fgBackBuffer == nullptr || hudless == nullptr)
+        return;
 
-ID3D12Resource* GameHudless::Dx12Hudless() { return g_dx12Hudless.load(); }
+    std::lock_guard<std::mutex> lock(g_dx12Mutex);
+
+    for (auto& entry : g_dx12Entries)
+    {
+        if (entry.backBuffer != fgBackBuffer)
+            continue;
+
+        if (entry.hudless != hudless)
+        {
+            DeferredRelease::Release(entry.hudless);
+            hudless->AddRef();
+            entry.hudless = hudless;
+        }
+
+        entry.serial = ++g_dx12Serial;
+        return;
+    }
+
+    hudless->AddRef();
+    g_dx12Entries.push_back({ fgBackBuffer, hudless, ++g_dx12Serial });
+}
+
+void GameHudless::UnpublishDx12(ID3D12Resource* fgBackBuffer)
+{
+    std::lock_guard<std::mutex> lock(g_dx12Mutex);
+
+    for (auto it = g_dx12Entries.begin(); it != g_dx12Entries.end(); ++it)
+    {
+        if (it->backBuffer != fgBackBuffer)
+            continue;
+
+        DeferredRelease::Release(it->hudless);
+        g_dx12Entries.erase(it);
+        return;
+    }
+}
+
+void GameHudless::ClearDx12()
+{
+    std::lock_guard<std::mutex> lock(g_dx12Mutex);
+
+    for (auto& entry : g_dx12Entries)
+        DeferredRelease::Release(entry.hudless);
+
+    g_dx12Entries.clear();
+}
+
+ID3D12Resource* GameHudless::FindDx12(ID3D12Resource* backBuffer, uint64_t* serial)
+{
+    if (backBuffer == nullptr)
+        return nullptr;
+
+    std::lock_guard<std::mutex> lock(g_dx12Mutex);
+
+    for (auto& entry : g_dx12Entries)
+    {
+        if (entry.backBuffer != backBuffer)
+            continue;
+
+        if (serial != nullptr)
+            *serial = entry.serial;
+
+        entry.hudless->AddRef();
+        return entry.hudless;
+    }
+
+    return nullptr;
+}
 
 void GameHudless::Release()
 {

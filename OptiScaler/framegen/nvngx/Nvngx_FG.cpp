@@ -30,6 +30,9 @@ static uint64_t evaluates = 0;
 static uint64_t fromStreamline = 0;
 static uint64_t fromGame = 0;
 static bool firstLogged = false;
+static bool missLogged = false;
+static ID3D12Resource* lastBackBuffer = nullptr; // identity only
+static uint64_t lastSerial = 0;
 
 static void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
                     D3D12_RESOURCE_STATES after)
@@ -84,7 +87,7 @@ static bool EnsureCopy(ID3D12GraphicsCommandList* cmdList, const D3D12_RESOURCE_
     return true;
 }
 
-static void Inject(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, uint32_t multiFrameIndex)
+static void Inject(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params)
 {
     if (cmdList == nullptr || params == nullptr || !GameHudless::IsEnabled())
         return;
@@ -93,8 +96,9 @@ static void Inject(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
 
     if (evaluates % 2400 == 0)
     {
-        LOG_INFO("DLSSG.HUDLess in the last 2400 evaluates: {} from Streamline, {} from the game's UI composite",
-                 fromStreamline, fromGame);
+        LOG_INFO("DLSSG.HUDLess in the last 2400 evaluates: {} from Streamline, {} from the game's UI composite, {} "
+                 "none (no image for that back buffer)",
+                 fromStreamline, fromGame, 2400 - fromStreamline - fromGame);
         fromStreamline = 0;
         fromGame = 0;
     }
@@ -109,25 +113,51 @@ static void Inject(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
         return;
     }
 
-    auto shared = GameHudless::Dx12Hudless();
+    // The HUD-less image of exactly the frame being evaluated
+    ID3D12Resource* backBuffer = nullptr;
+    params->Get("DLSSG.Backbuffer", &backBuffer);
+
+    uint64_t serial = 0;
+    auto shared = GameHudless::FindDx12(backBuffer, &serial);
+
     if (shared == nullptr)
     {
         if (current != nullptr)
             params->Set("DLSSG.HUDLess", (void*) nullptr);
+
+        if (!missLogged && evaluates > 600)
+        {
+            missLogged = true;
+            LOG_WARN("No HUD-less image for DLSSG.Backbuffer {:X}; frame generation runs without one for such frames",
+                     (size_t) backBuffer);
+        }
 
         return;
     }
 
     const auto sharedDesc = shared->GetDesc();
     if (!EnsureCopy(cmdList, sharedDesc))
+    {
+        shared->Release();
         return;
+    }
 
-    // Once per real frame; the later generated frames of a multi-frame set reuse it
-    if (multiFrameIndex <= 1 || current != copy)
+    // Once per real frame; the later generated frames of a multi-frame set reuse the copy
+    if (backBuffer != lastBackBuffer || serial != lastSerial)
     {
         Barrier(cmdList, copy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         cmdList->CopyResource(copy, shared); // the shared texture is in COMMON, promoted to COPY_SOURCE
         Barrier(cmdList, copy, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        lastBackBuffer = backBuffer;
+        lastSerial = serial;
+
+        // The command list still reads it when it runs
+        DeferredRelease::Release(shared);
+    }
+    else
+    {
+        shared->Release();
     }
 
     // cast to make sure it's void*, see Nvngx_DllProxy
@@ -137,8 +167,8 @@ static void Inject(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
     if (!firstLogged)
     {
         firstLogged = true;
-        LOG_INFO("DLSSG.HUDLess missing from Streamline: handing the game's HUD-less image ({}x{}, format {}) to the "
-                 "frame generation engine",
+        LOG_INFO("DLSSG.HUDLess: handing the game's HUD-less image ({}x{}, format {}) to the frame generation "
+                 "engine, matched by back buffer",
                  sharedDesc.Width, sharedDesc.Height, (UINT) sharedDesc.Format);
     }
 }
@@ -149,10 +179,7 @@ void Nvngx_FG::InjectGameHudless(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX
     if (InParameters == nullptr || Config::Instance()->FGDisableHudless.value_or_default())
         return;
 
-    uint32_t multiFrameIndex = 1;
-    InParameters->Get("DLSSG.MultiFrameIndex", &multiFrameIndex);
-
-    GameHudlessInject::Inject(InCmdList, InParameters, multiFrameIndex);
+    GameHudlessInject::Inject(InCmdList, InParameters);
 }
 
 IFGNvngx* Nvngx_FG::getProvider()

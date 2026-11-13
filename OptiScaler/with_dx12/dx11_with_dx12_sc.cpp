@@ -556,7 +556,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (hudlessWritten)
         _PublishHudless();
     else
-        GameHudless::SetDx12Hudless(nullptr);
+        GameHudless::UnpublishDx12(_lastFgBackBuffer);
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -1515,6 +1515,8 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     UINT fgIndex = _fgSwapChain->GetCurrentBackBufferIndex();
     LOG_DEBUG("dx11Index {}, fgIndex {}", dx11Index, fgIndex);
 
+    _lastFgBackBuffer = nullptr;
+
     ID3D12Resource* fgBackBuffer = nullptr;
     result = _fgSwapChain->GetBuffer(fgIndex, IID_PPV_ARGS(&fgBackBuffer));
     if (FAILED(result) || fgBackBuffer == nullptr)
@@ -1540,6 +1542,8 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
     _openedDx11BackBufferStates[copySlot] = D3D12_RESOURCE_STATE_COMMON;
 
+    // Identity of the back buffer this frame went into, for the HUD-less image (GameHudless::PublishDx12)
+    _lastFgBackBuffer = fgBackBuffer;
     fgBackBuffer->Release();
 
     result = _copyCommandLists[copySlot]->Close();
@@ -2242,47 +2246,31 @@ void Dx11wDx12SC::_PublishHudless()
 {
     auto fg = _fg;
 
-    if (fg == nullptr || !fg->IsActive() || fg->IsPaused() || _currentFakeIndex >= _openedHudless.size() ||
-        _openedHudless[_currentFakeIndex] == nullptr)
+    if (fg == nullptr || !fg->IsActive() || fg->IsPaused() || _lastFgBackBuffer == nullptr ||
+        _currentFakeIndex >= _openedHudless.size() || _openedHudless[_currentFakeIndex] == nullptr)
     {
-        GameHudless::SetDx12Hudless(nullptr);
+        GameHudless::UnpublishDx12(_lastFgBackBuffer);
         return;
     }
 
-    auto cmdList = fg->GetUICommandList();
-    if (cmdList == nullptr)
-        return;
-
-    const auto desc = _openedHudless[_currentFakeIndex]->GetDesc();
-
-    // For the NGX replacement path (custom DLSSG engines), see GameHudless::Dx12Hudless
-    GameHudless::SetDx12Hudless(_openedHudless[_currentFakeIndex]);
-
-    Dx12Resource resource = {};
-    resource.type = FG_ResourceType::HudlessColor;
-    resource.resource = _openedHudless[_currentFakeIndex];
-    resource.left = 0;
-    resource.top = 0;
-    resource.width = desc.Width;
-    resource.height = desc.Height;
-    resource.cmdList = cmdList;
-    resource.state = D3D12_RESOURCE_STATE_COMMON;
-    resource.validity = FG_ResourceValidity::ValidNow;
-    resource.frameIndex = fg->GetIndexWillBeDispatched();
-
-    const bool accepted = fg->SetResource(&resource);
+    // Not tagged for Streamline: its DLSS-G never passed the tag on to the engine. The DLSSG evaluate looks the
+    // image up by its back buffer instead (Nvngx_FG::InjectGameHudless).
+    GameHudless::PublishDx12(_lastFgBackBuffer, _openedHudless[_currentFakeIndex]);
 
     if (!_hudlessPublishLogged)
     {
         _hudlessPublishLogged = true;
-        LOG_INFO("HUD-less image given to frame generation ({}x{}, format {}): {}", desc.Width, desc.Height,
-                 (UINT) desc.Format, accepted ? "accepted" : "not accepted");
+
+        const auto desc = _openedHudless[_currentFakeIndex]->GetDesc();
+        LOG_INFO("HUD-less image published for frame generation ({}x{}, format {})", desc.Width, desc.Height,
+                 (UINT) desc.Format);
     }
 }
 
 void Dx11wDx12SC::_ReleaseHudlessResources()
 {
-    GameHudless::SetDx12Hudless(nullptr);
+    GameHudless::ClearDx12();
+    _lastFgBackBuffer = nullptr;
 
     for (auto& uav : _hdrHudlessUavs)
         SafeRelease(uav);

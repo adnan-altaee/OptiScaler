@@ -760,8 +760,21 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsComma
     const State& state = State::Instance();
     const Config& cfg = *Config::Instance();
 
+    // With a replacement loaded, NVIDIA's own DLSSG can still be picked per feature creation (live switch)
+    const bool fgUseNvidia = InFeatureID == NVSDK_NGX_Feature_FrameGeneration &&
+                             State::Instance().activeFgNvngx != FGNvngxReplacement::None &&
+                             cfg.NvngxFGUseNvidia.value_or_default();
+
+    if (InFeatureID == NVSDK_NGX_Feature_FrameGeneration)
+    {
+        State::Instance().fgNvngxFeatureIsNvidia = fgUseNvidia;
+
+        if (State::Instance().activeFgNvngx != FGNvngxReplacement::None)
+            LOG_INFO("Frame generation feature with {}", fgUseNvidia ? "NVIDIA's DLSSG" : "the DLSSG replacement");
+    }
+
     // DLSSG replacements passthrough
-    if (State::Instance().activeFgNvngx != FGNvngxReplacement::None && Nvngx_FG::isDx12Available() &&
+    if (State::Instance().activeFgNvngx != FGNvngxReplacement::None && !fgUseNvidia && Nvngx_FG::isDx12Available() &&
         InFeatureID == NVSDK_NGX_Feature_FrameGeneration)
     {
         LOG_INFO("Passthrough to DLSSG Replacement's CreateFeature for FrameGeneration");

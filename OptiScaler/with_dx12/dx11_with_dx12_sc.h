@@ -152,6 +152,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     std::vector<HANDLE> _sharedHudlessHandles;
     std::vector<ID3D12Resource*> _openedHudless;
     std::vector<ID3D11UnorderedAccessView*> _hdrHudlessUavs;
+    ID3D12Resource* _lastFgBackBuffer = nullptr; // identity only, not referenced
     bool _hudlessErrorLogged = false;
     bool _hudlessPublishLogged = false;
 

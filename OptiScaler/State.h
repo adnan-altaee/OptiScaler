@@ -214,6 +214,9 @@ class State
     FGNvngxReplacement activeFgNvngx = FGNvngxReplacement::None;
     std::string fgNvngxCustom;       // FGNvngxReplacement::Custom folder from the ini or menu
     std::string activeFgNvngxCustom; // The one this session runs
+    // The current frame generation feature was created with NVIDIA's DLSSG although a replacement is loaded
+    // (Config NvngxFGUseNvidia at its creation)
+    bool fgNvngxFeatureIsNvidia = false;
 
     // Streamline FG inputs
     Sl_Inputs slFGInputs = {};

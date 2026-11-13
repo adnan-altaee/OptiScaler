@@ -35,10 +35,16 @@ ID3D11Texture2D* TakeCapture();
 // Releases the capture texture (swapchain resize/destroy). The next composite recreates it.
 void Release();
 
-// The D3D12 side of the HUD-less image of the frame being presented (the Dx11wDx12 swapchain's shared copy, in
-// D3D12_RESOURCE_STATE_COMMON), or nullptr. Set by the swapchain every present, cleared before it is released.
-// Streamline's DLSS-G does not always pass the tagged HUD-less color on to the nvngx_dlssg it drives, so the NGX
-// replacement path (framegen/nvngx/Nvngx_FG.cpp) hands this one to custom engines itself when it is missing.
-void SetDx12Hudless(ID3D12Resource* resource);
-ID3D12Resource* Dx12Hudless();
+// D3D12 side: which HUD-less image belongs to which frame generation back buffer.
+// Streamline's DLSS-G doesn't pass a tagged HUD-less color on to the nvngx_dlssg it drives, and it evaluates on its
+// own thread, spread over the frame interval, so "the latest HUD-less image" can already belong to the next frame.
+// The Dx11wDx12 swapchain publishes each frame's shared HUD-less copy under the back buffer it copied that frame
+// into; the DLSSG evaluate (framegen/nvngx/Nvngx_FG.cpp) looks its DLSSG.Backbuffer up here.
+// Published resources are referenced here and released deferred, a pending command list may still read them.
+void PublishDx12(ID3D12Resource* fgBackBuffer, ID3D12Resource* hudless);
+// The frame in fgBackBuffer has no HUD-less image
+void UnpublishDx12(ID3D12Resource* fgBackBuffer);
+void ClearDx12();
+// AddRef'd, nullptr when backBuffer has no HUD-less image. serial changes with every publish.
+ID3D12Resource* FindDx12(ID3D12Resource* backBuffer, uint64_t* serial);
 } // namespace GameHudless

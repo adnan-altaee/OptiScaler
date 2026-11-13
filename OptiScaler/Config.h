@@ -743,6 +743,9 @@ class Config
     CustomOptional<uint32_t> NvngxFGDispatchFlags { 0x10000000 }; // IGNORE_UI_TEXTURE
     CustomOptional<bool> NvngxFGShowDebug { false };
     CustomOptional<bool> NvngxFGDisableHudless { false };
+    // With a replacement loaded: create the frame generation feature with NVIDIA's own DLSSG instead.
+    // Read at every feature creation, so it can be switched while the game runs (the menu restarts FG).
+    CustomOptional<bool> NvngxFGUseNvidia { false };
 
     // fakenvapi
     CustomOptional<bool, SoftDefault> UseFakenvapi { true };

@@ -2773,7 +2773,8 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             }
             else if (activeNvngxFg == FGNvngxReplacement::Custom)
             {
-                fgText = formatFg(state.activeFgNvngxCustom, Nvngx_FG::getMaxFakeFramesCount());
+                fgText = formatFg(state.fgNvngxFeatureIsNvidia ? "NVIDIA DLSSG" : state.activeFgNvngxCustom,
+                                  Nvngx_FG::getMaxFakeFramesCount());
             }
             else if (state.activeFgOutput == FGOutput::DLSSG && fg)
             {
@@ -6167,6 +6168,27 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         {
             SeparatorWithHelpMarker(StrFmt("Frame Generation (%s)", state.activeFgNvngxCustom.c_str()).c_str(),
                                     "Custom DLSSG from the custom folder");
+
+            // Live engine switch: the choice is read when the FG feature is created, so restart FG to apply it
+            int engine = config->NvngxFGUseNvidia.value_or_default() ? 1 : 0;
+            const int engineBefore = engine;
+
+            ImGui::TextUnformatted("Engine (switches live):");
+            ImGui::SameLine();
+            ImGui::RadioButton(state.activeFgNvngxCustom.c_str(), &engine, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("NVIDIA DLSSG", &engine, 1);
+
+            if (engine != engineBefore)
+            {
+                config->NvngxFGUseNvidia = engine == 1;
+                state.fgChanged = true;
+                LOG_INFO("Frame generation engine switched to {}, restarting frame generation",
+                         engine == 1 ? "NVIDIA's DLSSG" : state.activeFgNvngxCustom);
+            }
+
+            ImGui::Text("Running now: %s",
+                        state.fgNvngxFeatureIsNvidia ? "NVIDIA DLSSG" : state.activeFgNvngxCustom.c_str());
         }
         else if (activeNvngxFg == FGNvngxReplacement::Combo)
         {
