@@ -135,3 +135,23 @@ jobs:
         name: 'ACOrigins-FrameGen'
         path: '${{ github.workspace }}\mod-package\ACOrigins-FrameGen\'
         if-no-files-found: error
+
+    # The bare DLL on the 'builds' branch (one commit, replaced every run), for tools that can read the repository
+    # but not download Actions artifacts
+    - name: Publish the DLL to the builds branch
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dir = Join-Path $env:RUNNER_TEMP 'builds-branch'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        Copy-Item x64\Release\a\OptiScaler.dll $dir
+        $hash = (Get-FileHash (Join-Path $dir 'OptiScaler.dll') -Algorithm SHA256).Hash.ToLower()
+        Set-Content -Path (Join-Path $dir 'BUILD.txt') -Value @(
+          "commit=${{ github.sha }}", "branch=${{ github.ref_name }}", "run=${{ github.run_id }}", "sha256=$hash")
+        Set-Location $dir
+        git init -q -b builds
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        git add OptiScaler.dll BUILD.txt
+        git commit -q -m "Build of ${{ github.sha }} (${{ github.ref_name }}, run ${{ github.run_id }})"
+        git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" builds
