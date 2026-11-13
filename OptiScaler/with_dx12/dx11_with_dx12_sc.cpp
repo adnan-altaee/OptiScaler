@@ -26,6 +26,7 @@
 #include <tlhelp32.h>
 
 #include <format>
+#include <fstream>
 
 // ReShade add-on API (v6.8.0, API version 20). Only the API and event headers are used, not reshade.hpp,
 // so ReShade's Dear ImGui function table header is never pulled into this translation unit.
@@ -2235,6 +2236,9 @@ bool Dx11wDx12SC::_WriteHudlessToShared()
         }
     }
 
+    if (written)
+        _DiagnoseHudless();
+
     // No capture this frame: the frame itself (already converted when HDR10 is on)
     if (!written)
         _dx11Context->CopyResource(target, _sharedDx11BackBufferCopies[_currentFakeIndex]);
@@ -2290,4 +2294,162 @@ void Dx11wDx12SC::_ReleaseHudlessResources()
     _sharedHudlessHandles.clear();
 
     GameHudless::Release();
+}
+
+// Diagnosis: how much the HUD-less image differs from the frame frame generation gets. They should differ only
+// where the HUD (and ReShade's overlay) is. A few times per session both are read back and compared on the CPU;
+// the first time they are also written to the game folder as hudless-diag-frame.bmp / hudless-diag-hudless.bmp.
+// 8-bit RGBA/BGRA back buffers only (SDR).
+void Dx11wDx12SC::_DiagnoseHudless()
+{
+    _hudlessDiagFrames++;
+
+    const bool first = _hudlessDiagFrames == 900;
+    if (!first && _hudlessDiagFrames != 3000 && _hudlessDiagFrames != 9000)
+        return;
+
+    if (_dx11Device == nullptr || _dx11Context == nullptr || _currentFakeIndex >= _sharedHudlessCopies.size() ||
+        _sharedHudlessCopies[_currentFakeIndex] == nullptr || _sharedDx11BackBufferCopies[_currentFakeIndex] == nullptr)
+    {
+        return;
+    }
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    _sharedHudlessCopies[_currentFakeIndex]->GetDesc(&desc);
+
+    if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+    {
+        LOG_INFO("HUD-less diagnosis skipped, format {}", (UINT) desc.Format);
+        return;
+    }
+
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.MiscFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+    ID3D11Texture2D* staging[2] = {};
+    ID3D11Texture2D* sources[2] = { _sharedDx11BackBufferCopies[_currentFakeIndex],
+                                    _sharedHudlessCopies[_currentFakeIndex] };
+    std::vector<uint8_t> pixels[2];
+    bool ok = true;
+
+    for (int i = 0; i < 2 && ok; i++)
+    {
+        if (FAILED(_dx11Device->CreateTexture2D(&stagingDesc, nullptr, &staging[i])) || staging[i] == nullptr)
+        {
+            ok = false;
+            break;
+        }
+
+        _dx11Context->CopyResource(staging[i], sources[i]);
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED(_dx11Context->Map(staging[i], 0, D3D11_MAP_READ, 0, &mapped)))
+        {
+            ok = false;
+            break;
+        }
+
+        pixels[i].resize((size_t) desc.Width * desc.Height * 4);
+        for (UINT y = 0; y < desc.Height; y++)
+            memcpy(pixels[i].data() + (size_t) y * desc.Width * 4,
+                   (const uint8_t*) mapped.pData + (size_t) y * mapped.RowPitch, (size_t) desc.Width * 4);
+
+        _dx11Context->Unmap(staging[i], 0);
+    }
+
+    SafeRelease(staging[0]);
+    SafeRelease(staging[1]);
+
+    if (!ok)
+    {
+        LOG_WARN("HUD-less diagnosis: readback failed");
+        return;
+    }
+
+    // Per pixel: largest channel difference. Counted in a 16x9 grid as well, to see where the differences are.
+    const size_t total = (size_t) desc.Width * desc.Height;
+    size_t over0 = 0, over2 = 0, over8 = 0, over32 = 0;
+    uint64_t sum = 0;
+    size_t grid[9][16] = {};
+
+    for (UINT y = 0; y < desc.Height; y++)
+    {
+        const auto a = pixels[0].data() + (size_t) y * desc.Width * 4;
+        const auto b = pixels[1].data() + (size_t) y * desc.Width * 4;
+        const UINT gy = y * 9 / desc.Height;
+
+        for (UINT x = 0; x < desc.Width; x++)
+        {
+            int d = 0;
+            for (int c = 0; c < 3; c++)
+                d = std::max(d, std::abs((int) a[x * 4 + c] - (int) b[x * 4 + c]));
+
+            sum += d;
+            over0 += d > 0;
+            over2 += d > 2;
+            over32 += d > 32;
+
+            if (d > 8)
+            {
+                over8++;
+                grid[gy][x * 16 / desc.Width]++;
+            }
+        }
+    }
+
+    LOG_INFO("HUD-less diagnosis (frame {}): frame vs HUD-less differ in {:.2f}% of pixels (>0), {:.2f}% (>2), "
+             "{:.2f}% (>8), {:.2f}% (>32); mean difference {:.3f} of 255",
+             _hudlessDiagFrames, 100.0 * over0 / total, 100.0 * over2 / total, 100.0 * over8 / total,
+             100.0 * over32 / total, (double) sum / total);
+
+    const size_t cell = total / (16 * 9);
+    for (int gy = 0; gy < 9; gy++)
+    {
+        std::string row;
+        for (int gx = 0; gx < 16; gx++)
+            row += std::format("{:4d}", (int) (100 * grid[gy][gx] / std::max<size_t>(cell, 1)));
+
+        LOG_INFO("HUD-less diagnosis, % of pixels differing by >8 per screen cell, row {}:{}", gy, row);
+    }
+
+    if (!first)
+        return;
+
+    const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    const wchar_t* names[2] = { L"hudless-diag-frame.bmp", L"hudless-diag-hudless.bmp" };
+
+    for (int i = 0; i < 2; i++)
+    {
+        std::ofstream file(Util::ExePath().parent_path() / names[i], std::ios::binary);
+        if (!file)
+            continue;
+
+        BITMAPFILEHEADER fileHeader = {};
+        BITMAPINFOHEADER info = {};
+        info.biSize = sizeof(info);
+        info.biWidth = (LONG) desc.Width;
+        info.biHeight = -(LONG) desc.Height; // top-down
+        info.biPlanes = 1;
+        info.biBitCount = 32;
+        info.biCompression = BI_RGB;
+        fileHeader.bfType = 0x4D42;
+        fileHeader.bfOffBits = sizeof(fileHeader) + sizeof(info);
+        fileHeader.bfSize = fileHeader.bfOffBits + (DWORD) pixels[i].size();
+
+        if (!bgra)
+        {
+            for (size_t p = 0; p < pixels[i].size(); p += 4)
+                std::swap(pixels[i][p], pixels[i][p + 2]);
+        }
+
+        file.write((const char*) &fileHeader, sizeof(fileHeader));
+        file.write((const char*) &info, sizeof(info));
+        file.write((const char*) pixels[i].data(), (std::streamsize) pixels[i].size());
+    }
+
+    LOG_INFO("HUD-less diagnosis: wrote hudless-diag-frame.bmp and hudless-diag-hudless.bmp to the game folder");
 }

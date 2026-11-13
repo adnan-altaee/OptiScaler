@@ -85,6 +85,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _RequestSharedHudless();
     bool _WriteHudlessToShared();
     void _PublishHudless();
+    void _DiagnoseHudless();
     void _ReleaseHudlessResources();
     void _UpdateHdr10State();
     void _ReleaseHdr10Resources(bool releaseShader);
@@ -154,6 +155,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     std::vector<ID3D11UnorderedAccessView*> _hdrHudlessUavs;
     ID3D12Resource* _lastFgBackBuffer = nullptr; // identity only, not referenced
     bool _hudlessErrorLogged = false;
+    uint64_t _hudlessDiagFrames = 0;
     bool _hudlessPublishLogged = false;
 
     UINT _bufferCount = 0;
