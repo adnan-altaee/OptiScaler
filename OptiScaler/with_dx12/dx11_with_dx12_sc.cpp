@@ -2304,9 +2304,17 @@ void Dx11wDx12SC::_DiagnoseHudless()
 {
     _hudlessDiagFrames++;
 
-    const bool first = _hudlessDiagFrames == 900;
-    if (!first && _hudlessDiagFrames != 3000 && _hudlessDiagFrames != 9000)
-        return;
+    // Images are written each time, numbered: the first ones are usually still the title screen or a menu
+    int shot = 0;
+    for (const uint64_t at : { 1500, 3000, 6000, 12000 })
+    {
+        shot++;
+        if (_hudlessDiagFrames == at)
+            break;
+
+        if (shot == 4)
+            return;
+    }
 
     if (_dx11Device == nullptr || _dx11Context == nullptr || _currentFakeIndex >= _sharedHudlessCopies.size() ||
         _sharedHudlessCopies[_currentFakeIndex] == nullptr || _sharedDx11BackBufferCopies[_currentFakeIndex] == nullptr)
@@ -2416,11 +2424,9 @@ void Dx11wDx12SC::_DiagnoseHudless()
         LOG_INFO("HUD-less diagnosis, % of pixels differing by >8 per screen cell, row {}:{}", gy, row);
     }
 
-    if (!first)
-        return;
-
     const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-    const wchar_t* names[2] = { L"hudless-diag-frame.bmp", L"hudless-diag-hudless.bmp" };
+    const std::wstring names[2] = { std::format(L"hudless-diag-{}-frame.bmp", shot),
+                                    std::format(L"hudless-diag-{}-hudless.bmp", shot) };
 
     for (int i = 0; i < 2; i++)
     {
@@ -2451,5 +2457,5 @@ void Dx11wDx12SC::_DiagnoseHudless()
         file.write((const char*) pixels[i].data(), (std::streamsize) pixels[i].size());
     }
 
-    LOG_INFO("HUD-less diagnosis: wrote hudless-diag-frame.bmp and hudless-diag-hudless.bmp to the game folder");
+    LOG_INFO("HUD-less diagnosis: wrote hudless-diag-{}-frame.bmp and -hudless.bmp to the game folder", shot);
 }
